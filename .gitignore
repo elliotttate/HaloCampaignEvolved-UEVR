@@ -1,0 +1,37 @@
+# CMake and compiler outputs
+build/
+build-*/
+out/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.obj
+*.lib
+*.exp
+*.dll
+*.pdb
+
+# Reverse-engineering databases and runtime captures
+*.i64
+*.idb
+*.id0
+*.id1
+*.nam
+*.til
+*.log
+*.png
+evidence/
+
+# Local experiments copied from full UEVR profiles. The standalone reticle has
+# no dependency on these libraries and some register incompatible callbacks.
+scripts/libs/
+
+# Editor and OS files
+.vs/
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store

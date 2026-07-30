@@ -1,0 +1,27 @@
+cmake_minimum_required(VERSION 3.24)
+
+project(HaloCEMotionControls LANGUAGES CXX)
+
+set(
+    UEVR_SDK_INCLUDE
+    "${CMAKE_CURRENT_SOURCE_DIR}/../uevr-mcp/plugin/include"
+    CACHE PATH
+    "Directory containing uevr/Plugin.hpp"
+)
+
+add_library(HaloCEMotionControls SHARED
+    src/main.cpp
+)
+
+target_compile_features(HaloCEMotionControls PRIVATE cxx_std_20)
+target_compile_definitions(HaloCEMotionControls PRIVATE
+    WIN32_LEAN_AND_MEAN
+    NOMINMAX
+)
+target_include_directories(HaloCEMotionControls PRIVATE
+    "${UEVR_SDK_INCLUDE}"
+)
+
+set_target_properties(HaloCEMotionControls PROPERTIES
+    OUTPUT_NAME "HaloCEMotionControls"
+)
