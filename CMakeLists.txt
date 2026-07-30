@@ -25,3 +25,15 @@ target_include_directories(HaloCEMotionControls PRIVATE
 set_target_properties(HaloCEMotionControls PROPERTIES
     OUTPUT_NAME "HaloCEMotionControls"
 )
+
+include(CTest)
+if(BUILD_TESTING)
+    add_test(
+        NAME HaloCEMotionControls.SourceValidation
+        COMMAND powershell
+            -NoProfile
+            -ExecutionPolicy Bypass
+            -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/validate-source.ps1"
+            -SourcePath "${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp"
+    )
+endif()

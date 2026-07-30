@@ -40,6 +40,30 @@ This final sweep correction is important for instant first-tick hits. Merely
 moving the gun or rotating the spawned object's velocity does not redirect the
 collision query Halo has already prepared.
 
+## Independent hands and locomotion
+
+The first-person palette now uses the exact 76-node hierarchy read from the
+shipped Campaign Evolved tags. The weapon subtree (`7/8/22`) remains owned by
+the right aim pose, while the right shoulder/elbow/wrist (`5/16/19`) and left
+shoulder/elbow/wrist (`6/9/25`) are solved independently with reach-clamped
+two-bone IK. Each wrist rotation is then applied only to its exact hand and
+finger descendants. Losing the left controller leaves the stock left arm
+alone; it does not invalidate right-hand weapon aiming.
+
+The split path is deliberately fail-open. If a palette contains unreasonable
+matrices or either IK solve becomes degenerate, the plugin restores the
+untouched stock palette and applies the previously validated rigid right-hand
+transform for that frame. Set `UEVR_HALO_TWO_HAND_IK=0` before launch to force
+that legacy path for diagnosis.
+
+The plugin also copies UEVR's left OpenXR joystick action into Halo's ordinary
+left XInput stick with a small per-axis deadzone. It does not write guessed
+Blam player-control offsets, so keyboard and physical-gamepad movement remain
+intact. The runtime status flags expose left tracking (bit 5), enabled
+two-hand IK (bit 6), and whether the XInput locomotion callback has run
+(bit 7) after a nonzero OpenXR stick value has actually been written into
+Halo's XInput state.
+
 `scripts/halo_motion_reticle.lua` creates a stereo world-space reticle ten
 metres down the right-controller ray. The distance keeps the marker beyond
 Halo's unusually large first-person viewmodels and minimizes grip/muzzle

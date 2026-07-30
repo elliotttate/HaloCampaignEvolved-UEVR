@@ -10,9 +10,11 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <cwctype>
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -38,6 +40,9 @@ constexpr std::uint32_t kStatusTrackingValid = 1U << 1;
 constexpr std::uint32_t kStatusVisualWeaponAttached = 1U << 2;
 constexpr std::uint32_t kStatusNativeVisualHookInstalled = 1U << 3;
 constexpr std::uint32_t kStatusNativeProjectileHookInstalled = 1U << 4;
+constexpr std::uint32_t kStatusLeftTrackingValid = 1U << 5;
+constexpr std::uint32_t kStatusTwoHandIkEnabled = 1U << 6;
+constexpr std::uint32_t kStatusLocomotionBridgeObserved = 1U << 7;
 constexpr std::uint32_t kFirstPersonNodeCount = 76;
 
 struct Vec3 {
@@ -111,7 +116,11 @@ struct TrackingSnapshot {
     Vec3 hmd_position{};
     Quat hmd_rotation{};
     Vec3 right_grip_position{};
+    Quat right_grip_rotation{};
     Quat right_aim_rotation{};
+    Vec3 left_grip_position{};
+    Quat left_grip_rotation{};
+    bool left_valid{};
     bool valid{};
 };
 
@@ -194,8 +203,12 @@ std::atomic_uint32_t g_visual_override_count{};
 std::atomic_uint32_t g_visual_diagnostic_count{};
 std::atomic_uint32_t g_visual_build_entry_count{};
 std::atomic_bool g_tracking_valid{};
+std::atomic_bool g_left_tracking_valid{};
 std::atomic_bool g_visual_weapon_attached{};
 std::atomic_uintptr_t g_attached_component{};
+std::atomic_bool g_two_hand_ik_enabled{true};
+std::atomic_bool g_two_hand_ik_fallback_logged{};
+std::atomic_bool g_locomotion_bridge_observed{};
 
 TriggerCreateProjectilesFn g_original_trigger_create_projectiles{};
 GetMarkersFn g_original_get_markers{};
@@ -596,6 +609,13 @@ float dot(const Vec3& a, const Vec3& b) {
     return a.x * b.x + a.y * b.y + a.z * b.z;
 }
 
+Vec3 cross(const Vec3& a, const Vec3& b) {
+    return {
+        a.y * b.z - a.z * b.y,
+        a.z * b.x - a.x * b.z,
+        a.x * b.y - a.y * b.x};
+}
+
 float length_squared(const Vec3& value) {
     return dot(value, value);
 }
@@ -669,6 +689,42 @@ Mat3 transpose(const Mat3& value) {
         {value.forward.x, value.left.x, value.up.x},
         {value.forward.y, value.left.y, value.up.y},
         {value.forward.z, value.left.z, value.up.z}};
+}
+
+Mat3 rotation_basis(const Quat& rotation) {
+    return {
+        rotate(rotation, {1.0f, 0.0f, 0.0f}),
+        rotate(rotation, {0.0f, 1.0f, 0.0f}),
+        rotate(rotation, {0.0f, 0.0f, 1.0f})};
+}
+
+Mat3 rotation_between(const Vec3& source, const Vec3& destination) {
+    const auto from = normalized(source);
+    const auto to = normalized(destination);
+    if (length_squared(from) < 0.8f || length_squared(to) < 0.8f) {
+        return {};
+    }
+
+    const auto alignment = std::clamp(dot(from, to), -1.0f, 1.0f);
+    if (alignment > 0.9999f) {
+        return {};
+    }
+
+    Quat rotation{};
+    if (alignment < -0.9999f) {
+        auto axis = cross(from, {1.0f, 0.0f, 0.0f});
+        if (length_squared(axis) < 1.0e-6f) {
+            axis = cross(from, {0.0f, 1.0f, 0.0f});
+        }
+        axis = normalized(axis);
+        rotation = {axis.x, axis.y, axis.z, 0.0f};
+    } else {
+        const auto axis = cross(from, to);
+        rotation = normalized(
+            {axis.x, axis.y, axis.z, 1.0f + alignment});
+    }
+
+    return rotation_basis(rotation);
 }
 
 Mat3 orthonormal_basis(const BlamMatrix4x3& value) {
@@ -801,7 +857,135 @@ bool reasonable_palette_matrix(const BlamMatrix4x3& matrix) {
                kMaximumPositionMagnitudeSquared;
 }
 
-bool apply_controller_to_first_person_palette(
+void apply_rigid_delta(
+    BlamMatrix4x3* palette,
+    std::span<const std::uint8_t> nodes,
+    const Mat3& rotation,
+    const Vec3& pivot) {
+    for (const auto node : nodes) {
+        auto& matrix = palette[node];
+        matrix.forward =
+            normalized(transform_vector(rotation, matrix.forward));
+        matrix.left =
+            normalized(transform_vector(rotation, matrix.left));
+        matrix.up =
+            normalized(transform_vector(rotation, matrix.up));
+        matrix.position =
+            pivot + transform_vector(rotation, matrix.position - pivot);
+    }
+}
+
+bool solve_two_bone_arm(
+    BlamMatrix4x3* palette,
+    std::uint8_t shoulder_node,
+    std::uint8_t elbow_node,
+    std::uint8_t wrist_node,
+    std::span<const std::uint8_t> shoulder_nodes,
+    std::span<const std::uint8_t> elbow_nodes,
+    std::span<const std::uint8_t> wrist_nodes,
+    const Vec3& requested_wrist_position,
+    const Mat3& desired_wrist_basis,
+    const Vec3& fallback_pole) {
+    const auto shoulder_position = palette[shoulder_node].position;
+    const auto elbow_position = palette[elbow_node].position;
+    const auto wrist_position = palette[wrist_node].position;
+    const auto upper_length = std::sqrt(
+        length_squared(elbow_position - shoulder_position));
+    const auto lower_length = std::sqrt(
+        length_squared(wrist_position - elbow_position));
+    if (!std::isfinite(upper_length) || !std::isfinite(lower_length) ||
+        upper_length < 1.0e-4f || lower_length < 1.0e-4f ||
+        !finite(requested_wrist_position) ||
+        !valid_basis(desired_wrist_basis)) {
+        return false;
+    }
+
+    auto target_delta = requested_wrist_position - shoulder_position;
+    auto target_distance = std::sqrt(length_squared(target_delta));
+    if (!std::isfinite(target_distance) || target_distance < 1.0e-4f) {
+        return false;
+    }
+
+    const auto target_direction = target_delta / target_distance;
+    const auto minimum_reach =
+        std::abs(upper_length - lower_length) + 1.0e-4f;
+    const auto maximum_reach =
+        upper_length + lower_length - 1.0e-4f;
+    target_distance =
+        std::clamp(target_distance, minimum_reach, maximum_reach);
+    const auto wrist_target =
+        shoulder_position + target_direction * target_distance;
+
+    auto pole = elbow_position - shoulder_position;
+    pole = pole - target_direction * dot(pole, target_direction);
+    if (length_squared(pole) < 1.0e-6f) {
+        pole = fallback_pole -
+               target_direction * dot(fallback_pole, target_direction);
+    }
+    if (length_squared(pole) < 1.0e-6f) {
+        pole = cross(target_direction, {0.0f, 0.0f, 1.0f});
+    }
+    pole = normalized(pole);
+    if (length_squared(pole) < 0.8f) {
+        return false;
+    }
+
+    const auto along =
+        (target_distance * target_distance +
+         upper_length * upper_length -
+         lower_length * lower_length) /
+        (2.0f * target_distance);
+    const auto height_squared =
+        std::max(upper_length * upper_length - along * along, 0.0f);
+    const auto elbow_target =
+        shoulder_position + target_direction * along +
+        pole * std::sqrt(height_squared);
+
+    const auto shoulder_rotation = rotation_between(
+        elbow_position - shoulder_position,
+        elbow_target - shoulder_position);
+    if (!valid_basis(shoulder_rotation)) {
+        return false;
+    }
+    apply_rigid_delta(
+        palette,
+        shoulder_nodes,
+        shoulder_rotation,
+        shoulder_position);
+
+    const auto moved_elbow = palette[elbow_node].position;
+    const auto moved_wrist = palette[wrist_node].position;
+    const auto elbow_rotation = rotation_between(
+        moved_wrist - moved_elbow,
+        wrist_target - moved_elbow);
+    if (!valid_basis(elbow_rotation)) {
+        return false;
+    }
+    apply_rigid_delta(
+        palette,
+        elbow_nodes,
+        elbow_rotation,
+        moved_elbow);
+
+    const auto final_wrist_position = palette[wrist_node].position;
+    const auto current_wrist_basis =
+        orthonormal_basis(palette[wrist_node]);
+    const auto wrist_rotation = multiply(
+        desired_wrist_basis,
+        transpose(current_wrist_basis));
+    if (!valid_basis(current_wrist_basis) ||
+        !valid_basis(wrist_rotation)) {
+        return false;
+    }
+    apply_rigid_delta(
+        palette,
+        wrist_nodes,
+        wrist_rotation,
+        final_wrist_position);
+    return true;
+}
+
+bool apply_split_controllers_to_first_person_palette(
     BlamMatrix4x3* palette,
     std::int32_t count,
     const TrackingSnapshot& tracking) {
@@ -812,16 +996,11 @@ bool apply_controller_to_first_person_palette(
     }
 
     // Baboon confirms all 16 shipped Campaign Evolved first-person skeletons
-    // use the same 76-node topology. Nodes 0-4 are the pedestal, chest,
-    // aim-pitch, aim-yaw, and camera-control branches. Nodes 5-75 are exactly
-    // the two shoulder/arm trees plus the weapon tree, so applying one rigid
-    // delta to that contiguous range keeps both hands attached to the gun
-    // without feeding controller motion back into the camera.
-    constexpr std::uint8_t assembly_first_node = 5;
-    constexpr std::uint8_t assembly_end_node =
-        static_cast<std::uint8_t>(kFirstPersonNodeCount);
-    for (std::uint8_t node = assembly_first_node;
-         node < assembly_end_node;
+    // use this same 76-node topology. Keep the three sibling trees separate:
+    // right shoulder 5, left shoulder 6, and weapon 7. The weapon subtree is
+    // only 7/8/22; each wrist has its own exact descendants below.
+    for (std::uint8_t node = 5;
+         node < static_cast<std::uint8_t>(kFirstPersonNodeCount);
          ++node) {
         if (!reasonable_palette_matrix(palette[node])) {
             return false;
@@ -896,19 +1075,176 @@ bool apply_controller_to_first_person_palette(
         desired_weapon_position -
         transform_vector(delta_basis, palette[8].position);
 
-    constexpr std::size_t assembly_node_count =
-        kFirstPersonNodeCount - assembly_first_node;
-    std::array<BlamMatrix4x3, assembly_node_count> transformed{};
-    for (std::uint8_t node = assembly_first_node;
-         node < assembly_end_node;
+    constexpr std::array<std::uint8_t, 3> weapon_nodes{7, 8, 22};
+    for (const auto node : weapon_nodes) {
+        auto& matrix = palette[node];
+        matrix.forward =
+            normalized(transform_vector(delta_basis, matrix.forward));
+        matrix.left =
+            normalized(transform_vector(delta_basis, matrix.left));
+        matrix.up =
+            normalized(transform_vector(delta_basis, matrix.up));
+        matrix.position =
+            delta_position +
+            transform_vector(delta_basis, matrix.position);
+    }
+
+    constexpr std::array<std::uint8_t, 34> right_shoulder_nodes{
+        5, 10, 11, 12, 16, 17, 18, 19, 20, 21, 30, 31, 34, 36, 37, 40,
+        41, 43, 44, 45, 48, 49, 53, 55, 56, 59, 60, 63, 65, 66, 69, 70,
+        73, 74};
+    constexpr std::array<std::uint8_t, 29> right_elbow_nodes{
+        16, 17, 18, 19, 20, 30, 31, 34, 36, 37, 40, 41, 43, 44, 45,
+        48, 49, 53, 55, 56, 59, 60, 63, 65, 66, 69, 70, 73, 74};
+    constexpr std::array<std::uint8_t, 24> right_wrist_nodes{
+        19, 30, 31, 36, 37, 40, 41, 43, 44, 45, 48, 49,
+        53, 55, 56, 59, 60, 63, 65, 66, 69, 70, 73, 74};
+    constexpr std::array<std::uint8_t, 34> left_shoulder_nodes{
+        6, 9, 13, 14, 15, 23, 24, 25, 26, 27, 28, 29, 32, 33, 35, 38,
+        39, 42, 46, 47, 50, 51, 52, 54, 57, 58, 61, 62, 64, 67, 68, 71,
+        72, 75};
+    constexpr std::array<std::uint8_t, 29> left_elbow_nodes{
+        9, 24, 25, 26, 27, 28, 29, 32, 33, 35, 38, 39, 42, 46, 47,
+        50, 51, 52, 54, 57, 58, 61, 62, 64, 67, 68, 71, 72, 75};
+    constexpr std::array<std::uint8_t, 24> left_wrist_nodes{
+        25, 28, 29, 32, 33, 38, 39, 42, 46, 47, 50, 51,
+        52, 54, 57, 58, 61, 62, 64, 67, 68, 71, 72, 75};
+
+    const auto source_right_wrist_basis =
+        orthonormal_basis(palette[19]);
+    const auto right_wrist_target =
+        delta_position +
+        transform_vector(delta_basis, palette[19].position);
+    const auto right_wrist_basis =
+        multiply(delta_basis, source_right_wrist_basis);
+    if (!solve_two_bone_arm(
+            palette,
+            5,
+            16,
+            19,
+            right_shoulder_nodes,
+            right_elbow_nodes,
+            right_wrist_nodes,
+            right_wrist_target,
+            right_wrist_basis,
+            root_basis.up)) {
+        return false;
+    }
+
+    if (tracking.left_valid) {
+        const auto left_grip_rotation =
+            normalized(tracking.left_grip_rotation);
+        const auto left_grip_delta_xr = rotate(
+            inverse_hmd_rotation,
+            tracking.left_grip_position - tracking.hmd_position);
+        const auto left_relative_xr =
+            normalized(inverse_hmd_rotation * left_grip_rotation);
+        const auto left_controller_basis =
+            openxr_rotation_to_blam_basis(left_relative_xr);
+        const auto stock_left_wrist_basis =
+            orthonormal_basis(palette[25]);
+        const auto stock_left_wrist_relative =
+            multiply(transpose(root_basis), stock_left_wrist_basis);
+        const auto desired_left_wrist_basis = multiply(
+            multiply(root_basis, left_controller_basis),
+            stock_left_wrist_relative);
+        const auto left_grip_delta_blam =
+            openxr_to_blam(left_grip_delta_xr) / kMetersPerBlamUnit;
+        const auto left_wrist_target =
+            palette[0].position +
+            transform_vector(root_basis, left_grip_delta_blam);
+        if (!finite(left_grip_delta_xr) ||
+            !valid_basis(left_controller_basis) ||
+            !solve_two_bone_arm(
+                palette,
+                6,
+                9,
+                25,
+                left_shoulder_nodes,
+                left_elbow_nodes,
+                left_wrist_nodes,
+                left_wrist_target,
+                desired_left_wrist_basis,
+                root_basis.up)) {
+            return false;
+        }
+    }
+
+    for (std::uint8_t node = 5;
+         node < static_cast<std::uint8_t>(kFirstPersonNodeCount);
+         ++node) {
+        if (!reasonable_palette_matrix(palette[node]) ||
+            !valid_basis(orthonormal_basis(palette[node]))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool apply_legacy_controller_to_first_person_palette(
+    BlamMatrix4x3* palette,
+    std::int32_t count,
+    const TrackingSnapshot& tracking) {
+    if (palette == nullptr ||
+        count != static_cast<std::int32_t>(kFirstPersonNodeCount) ||
+        !tracking.valid) {
+        return false;
+    }
+
+    const auto hmd_rotation = normalized(tracking.hmd_rotation);
+    const auto aim_rotation = normalized(tracking.right_aim_rotation);
+    const auto root_basis = orthonormal_basis(palette[0]);
+    const auto weapon_basis = orthonormal_basis(palette[8]);
+    if (!finite(hmd_rotation) || !finite(aim_rotation) ||
+        !valid_basis(root_basis) || !valid_basis(weapon_basis)) {
+        return false;
+    }
+
+    const auto inverse_hmd_rotation = conjugate(hmd_rotation);
+    const auto grip_delta_xr = rotate(
+        inverse_hmd_rotation,
+        tracking.right_grip_position - tracking.hmd_position);
+    const auto aim_relative_xr =
+        normalized(inverse_hmd_rotation * aim_rotation);
+    const auto controller_basis =
+        openxr_rotation_to_blam_basis(aim_relative_xr);
+    const Mat3 visual_weapon_basis{
+        controller_basis.left * -1.0f,
+        controller_basis.forward,
+        controller_basis.up};
+    if (!finite(grip_delta_xr) || !finite(aim_relative_xr) ||
+        !valid_basis(controller_basis) ||
+        !valid_basis(visual_weapon_basis)) {
+        return false;
+    }
+
+    const auto desired_weapon_basis =
+        multiply(root_basis, visual_weapon_basis);
+    const auto grip_delta_blam =
+        openxr_to_blam(grip_delta_xr) / kMetersPerBlamUnit;
+    const auto desired_weapon_position =
+        palette[0].position +
+        transform_vector(root_basis, grip_delta_blam);
+    const auto delta_basis =
+        multiply(desired_weapon_basis, transpose(weapon_basis));
+    const auto delta_position =
+        desired_weapon_position -
+        transform_vector(delta_basis, palette[8].position);
+    if (!valid_basis(delta_basis) || !finite(delta_position)) {
+        return false;
+    }
+
+    std::array<BlamMatrix4x3, kFirstPersonNodeCount - 5> transformed{};
+    for (std::uint8_t node = 5;
+         node < static_cast<std::uint8_t>(kFirstPersonNodeCount);
          ++node) {
         auto matrix = palette[node];
-        matrix.forward = normalized(
-            transform_vector(delta_basis, matrix.forward));
-        matrix.left = normalized(
-            transform_vector(delta_basis, matrix.left));
-        matrix.up = normalized(
-            transform_vector(delta_basis, matrix.up));
+        matrix.forward =
+            normalized(transform_vector(delta_basis, matrix.forward));
+        matrix.left =
+            normalized(transform_vector(delta_basis, matrix.left));
+        matrix.up =
+            normalized(transform_vector(delta_basis, matrix.up));
         matrix.position =
             delta_position +
             transform_vector(delta_basis, matrix.position);
@@ -916,16 +1252,48 @@ bool apply_controller_to_first_person_palette(
             !valid_basis(orthonormal_basis(matrix))) {
             return false;
         }
-        transformed[node - assembly_first_node] = matrix;
+        transformed[node - 5] = matrix;
     }
-
-    for (std::uint8_t node = assembly_first_node;
-         node < assembly_end_node;
+    for (std::uint8_t node = 5;
+         node < static_cast<std::uint8_t>(kFirstPersonNodeCount);
          ++node) {
-        palette[node] = transformed[node - assembly_first_node];
+        palette[node] = transformed[node - 5];
+    }
+    return true;
+}
+
+bool apply_controller_to_first_person_palette(
+    BlamMatrix4x3* palette,
+    std::int32_t count,
+    const TrackingSnapshot& tracking) {
+    if (palette == nullptr ||
+        count != static_cast<std::int32_t>(kFirstPersonNodeCount)) {
+        return false;
     }
 
-    return true;
+    std::array<BlamMatrix4x3, kFirstPersonNodeCount> stock{};
+    std::copy_n(palette, kFirstPersonNodeCount, stock.begin());
+    if (g_two_hand_ik_enabled.load(std::memory_order_relaxed) &&
+        apply_split_controllers_to_first_person_palette(
+            palette,
+            count,
+            tracking)) {
+        return true;
+    }
+
+    if (g_two_hand_ik_enabled.load(std::memory_order_relaxed) &&
+        !g_two_hand_ik_fallback_logged.exchange(
+            true,
+            std::memory_order_relaxed)) {
+        API::get()->log_warn(
+            "HaloCEMotionControls: split arm IK rejected this palette; "
+            "restoring it and using the validated rigid right-hand path");
+    }
+    std::copy(stock.begin(), stock.end(), palette);
+    return apply_legacy_controller_to_first_person_palette(
+        palette,
+        count,
+        tracking);
 }
 
 std::string current_executable_name() {
@@ -2102,6 +2470,15 @@ extern "C" __declspec(dllexport) bool HaloCEVR_GetStatus(
     if (g_native_projectile_hook_installed.load(std::memory_order_acquire)) {
         flags |= kStatusNativeProjectileHookInstalled;
     }
+    if (g_left_tracking_valid.load(std::memory_order_acquire)) {
+        flags |= kStatusLeftTrackingValid;
+    }
+    if (g_two_hand_ik_enabled.load(std::memory_order_acquire)) {
+        flags |= kStatusTwoHandIkEnabled;
+    }
+    if (g_locomotion_bridge_observed.load(std::memory_order_acquire)) {
+        flags |= kStatusLocomotionBridgeObserved;
+    }
 
     const HaloCEVR_RuntimeStatus snapshot{
         .size = sizeof(HaloCEVR_RuntimeStatus),
@@ -2133,6 +2510,20 @@ public:
         }
 
         m_armed = true;
+        std::array<wchar_t, 16> two_hand_setting{};
+        const auto two_hand_setting_length = GetEnvironmentVariableW(
+            L"UEVR_HALO_TWO_HAND_IK",
+            two_hand_setting.data(),
+            static_cast<DWORD>(two_hand_setting.size()));
+        if (two_hand_setting_length > 0 &&
+            two_hand_setting_length < two_hand_setting.size()) {
+            const auto first = static_cast<wchar_t>(
+                std::towlower(two_hand_setting.front()));
+            g_two_hand_ik_enabled.store(
+                first != L'0' && first != L'f' &&
+                first != L'n' && first != L'o',
+                std::memory_order_release);
+        }
         const auto marker = reticle_active_marker_path();
         if (!marker.empty()) {
             DeleteFileW(marker.c_str());
@@ -2151,8 +2542,9 @@ public:
         API::VR::set_mod_value("VR_DecoupledPitchUIAdjust", false);
         api->log_info(
             "HaloCEMotionControls: armed; visual weapon and native Blam "
-            "muzzle are owned by the right controller; game camera aim "
-            "and pitch/UI compensation remain disabled");
+            "muzzle are owned by the right controller; two-hand IK=%d; "
+            "game camera aim and pitch/UI compensation remain disabled",
+            g_two_hand_ik_enabled.load(std::memory_order_relaxed) ? 1 : 0);
     }
 
     void on_pre_engine_tick(API::UGameEngine* engine, float delta) override {
@@ -2212,17 +2604,85 @@ public:
         }
     }
 
+    void on_xinput_get_state(
+        std::uint32_t* retval,
+        std::uint32_t user_index,
+        XINPUT_STATE* state) override {
+        if (!m_armed || retval == nullptr || state == nullptr ||
+            !API::VR::is_runtime_ready() ||
+            user_index != API::VR::get_lowest_xinput_index()) {
+            return;
+        }
+
+        const auto source = API::VR::get_left_joystick_source();
+        const auto raw_axis = API::VR::get_joystick_axis(source);
+        if (!std::isfinite(raw_axis.x) || !std::isfinite(raw_axis.y)) {
+            return;
+        }
+        if (std::abs(raw_axis.x) <= 0.001f &&
+            std::abs(raw_axis.y) <= 0.001f &&
+            (state->Gamepad.sThumbLX != 0 ||
+             state->Gamepad.sThumbLY != 0)) {
+            // A real gamepad already supplied movement and the OpenXR action
+            // is idle. Do not erase that physical input.
+            return;
+        }
+
+        // UEVR's generic mapping can return a zero XInput stick for interaction
+        // profiles it does not recognize even though the OpenXR action itself
+        // is valid. Feed the left OpenXR stick into Halo's normal XInput path;
+        // this preserves keyboard/gamepad movement and needs no Blam memory
+        // write or build-specific movement offset.
+        constexpr float deadzone = 0.12f;
+        const auto apply_deadzone = [](float value) {
+            const auto magnitude = std::abs(value);
+            if (magnitude <= deadzone) {
+                return 0.0f;
+            }
+            const auto remapped =
+                (magnitude - deadzone) / (1.0f - deadzone);
+            return std::copysign(std::min(remapped, 1.0f), value);
+        };
+        const auto x = apply_deadzone(
+            std::clamp(raw_axis.x, -1.0f, 1.0f));
+        const auto y = apply_deadzone(
+            std::clamp(raw_axis.y, -1.0f, 1.0f));
+        state->Gamepad.sThumbLX =
+            static_cast<SHORT>(std::lround(x * 32767.0f));
+        state->Gamepad.sThumbLY =
+            static_cast<SHORT>(std::lround(y * 32767.0f));
+        *retval = ERROR_SUCCESS;
+        if (x == 0.0f && y == 0.0f) {
+            return;
+        }
+
+        const auto first_locomotion_callback =
+            !g_locomotion_bridge_observed.exchange(
+                true,
+            std::memory_order_release);
+
+        if (first_locomotion_callback) {
+            API::get()->log_info(
+                "HaloCEMotionControls: left OpenXR thumbstick is bridged "
+                "to Halo XInput locomotion");
+        }
+    }
+
 private:
     void update_tracking_snapshot() {
         TrackingSnapshot snapshot{};
         if (API::VR::is_runtime_ready() && API::VR::is_hmd_active()) {
             const auto hmd_index = API::VR::get_hmd_index();
             const auto right_index = API::VR::get_right_controller_index();
+            const auto left_index = API::VR::get_left_controller_index();
             if (hmd_index < 0 || hmd_index >= 64 || right_index < 0 ||
                 right_index >= 64) {
                 const std::scoped_lock lock{g_tracking_mutex};
                 g_tracking_snapshot = snapshot;
                 g_tracking_valid.store(false, std::memory_order_release);
+                g_left_tracking_valid.store(
+                    false,
+                    std::memory_order_release);
                 return;
             }
 
@@ -2243,6 +2703,11 @@ private:
                 grip.position.x,
                 grip.position.y,
                 grip.position.z};
+            snapshot.right_grip_rotation = {
+                grip.rotation.x,
+                grip.rotation.y,
+                grip.rotation.z,
+                grip.rotation.w};
             snapshot.right_aim_rotation = {
                 aim.rotation.x,
                 aim.rotation.y,
@@ -2252,12 +2717,33 @@ private:
                 finite(snapshot.hmd_position) &&
                 finite(snapshot.hmd_rotation) &&
                 finite(snapshot.right_grip_position) &&
+                finite(snapshot.right_grip_rotation) &&
                 finite(snapshot.right_aim_rotation);
+
+            if (left_index >= 0 && left_index < 64) {
+                const auto left_grip =
+                    API::VR::get_grip_pose(left_index);
+                snapshot.left_grip_position = {
+                    left_grip.position.x,
+                    left_grip.position.y,
+                    left_grip.position.z};
+                snapshot.left_grip_rotation = {
+                    left_grip.rotation.x,
+                    left_grip.rotation.y,
+                    left_grip.rotation.z,
+                    left_grip.rotation.w};
+                snapshot.left_valid =
+                    finite(snapshot.left_grip_position) &&
+                    finite(snapshot.left_grip_rotation);
+            }
         }
 
         const std::scoped_lock lock{g_tracking_mutex};
         g_tracking_snapshot = snapshot;
         g_tracking_valid.store(snapshot.valid, std::memory_order_release);
+        g_left_tracking_valid.store(
+            snapshot.left_valid,
+            std::memory_order_release);
     }
 
     void maintain_weapon_attachment() {
