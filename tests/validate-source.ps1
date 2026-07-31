@@ -75,8 +75,13 @@ foreach ($entry in $roots.GetEnumerator()) {
 
 $requiredFailOpenTokens = @(
     'apply_split_controllers_to_first_person_palette',
+    'place_wrist_subtree',
+    'solve_visual_arm_for_floating_wrist',
+    'std::array<BlamMatrix4x3, kFirstPersonNodeCount> visual_palette',
+    'The floating hand remains authoritative',
     'std::copy(stock.begin(), stock.end(), palette)',
     'apply_legacy_controller_to_first_person_palette',
+    'UEVR_HALO_ARM_IK',
     'UEVR_HALO_TWO_HAND_IK'
 )
 foreach ($token in $requiredFailOpenTokens) {
@@ -85,9 +90,66 @@ foreach ($token in $requiredFailOpenTokens) {
     }
 }
 
+$requiredArmAnchorTokens = @(
+    'torso_basis_from_root',
+    'anchor_shoulder_to_torso',
+    'kShoulderBackMeters',
+    'kClavicleAssistMaxMeters',
+    'kGripToWristBackMeters',
+    'g_left_wrist_stock_relative'
+)
+foreach ($token in $requiredArmAnchorTokens) {
+    if (-not $source.Contains($token)) {
+        throw "Missing arm-anchor token: $token"
+    }
+}
+
+$requiredTwoHandHoldTokens = @(
+    'effective_controller_basis',
+    'update_two_hand_hold',
+    'kTwoHandMinimumAgreement',
+    'kTwoHandFullAgreement',
+    'kTwoHandZoneRadiusMeters',
+    'g_two_hand_last_forward',
+    'halo_motion_reticle_hide.active',
+    'UEVR_HALO_TWO_HAND_HOLD',
+    'kStatusTwoHandHoldActive'
+)
+foreach ($token in $requiredTwoHandHoldTokens) {
+    if (-not $source.Contains($token)) {
+        throw "Missing two-hand hold token: $token"
+    }
+}
+
+$requiredScopedFireTokens = @(
+    'g_local_zoomed',
+    'IsGamePaused',
+    'update_game_paused'
+)
+foreach ($token in $requiredScopedFireTokens) {
+    if (-not $source.Contains($token)) {
+        throw "Missing scoped-fire token: $token"
+    }
+}
+
+$requiredLateTrackingTokens = @(
+    'get_late_tracking_snapshot',
+    'predicted_display_time',
+    'coherent late OpenXR tracking is ',
+    'g_local_fire_tracking = capture_tracking_snapshot()',
+    'auto tracking = capture_tracking_snapshot()'
+)
+foreach ($token in $requiredLateTrackingTokens) {
+    if (-not $source.Contains($token)) {
+        throw "Missing late-tracking token: $token"
+    }
+}
+
 $requiredLocomotionTokens = @(
     'on_xinput_get_state',
     'get_left_joystick_source',
+    'XINPUT_GAMEPAD_DPAD_UP',
+    'Do not re-inject analog movement on top of the shifted buttons',
     'sThumbLX',
     'sThumbLY'
 )
@@ -95,6 +157,36 @@ foreach ($token in $requiredLocomotionTokens) {
     if (-not $source.Contains($token)) {
         throw "Missing locomotion bridge token: $token"
     }
+}
+
+$requiredBallisticTokens = @(
+    'kReticleDistanceMeters',
+    'reticle_position - destination.position',
+    'direction_override->reticle_position - *start',
+    'primary_sweep_consumed',
+    'direction_override->desired_direction'
+)
+foreach ($token in $requiredBallisticTokens) {
+    if (-not $source.Contains($token)) {
+        throw "Missing converged center-ray token: $token"
+    }
+}
+
+$requiredWorldReticleTokens = @(
+    'one-sided Widget3D pass uses local +X',
+    'std::atan2(-direction.y, -direction.x)',
+    'disable_world_reticle_depth_test',
+    'restore_world_reticle_depth_test',
+    'L"bDisableDepthTest"'
+)
+foreach ($token in $requiredWorldReticleTokens) {
+    if (-not $source.Contains($token)) {
+        throw "Missing front-facing world-reticle token: $token"
+    }
+}
+
+if (-not [regex]::IsMatch($source, 'std::atan2\(\s*-direction\.z,')) {
+    throw 'World reticle pitch does not point local +X back toward the camera'
 }
 
 Write-Output 'Halo motion-control source validation passed.'

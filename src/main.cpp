@@ -1,3 +1,4 @@
+#include <uevr/HaloCEVRDiagnostics.h>
 #include <uevr/Plugin.hpp>
 
 #include <Windows.h>
@@ -8,6 +9,7 @@
 #include <atomic>
 #include <cctype>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <cwctype>
@@ -43,7 +45,55 @@ constexpr std::uint32_t kStatusNativeProjectileHookInstalled = 1U << 4;
 constexpr std::uint32_t kStatusLeftTrackingValid = 1U << 5;
 constexpr std::uint32_t kStatusTwoHandIkEnabled = 1U << 6;
 constexpr std::uint32_t kStatusLocomotionBridgeObserved = 1U << 7;
+constexpr std::uint32_t kStatusTwoHandHoldActive = 1U << 8;
+constexpr std::uint32_t kDiagnosticVisualValid = 1U << 0;
+constexpr std::uint32_t kDiagnosticMarkerValid = 1U << 1;
+constexpr std::uint32_t kDiagnosticProjectileValid = 1U << 2;
+constexpr std::uint32_t kDiagnosticLeftWristValid = 1U << 3;
+constexpr std::uint32_t kDiagnosticRightHandGeometryValid = 1U << 4;
+constexpr std::uint32_t kDiagnosticLeftHandGeometryValid = 1U << 5;
 constexpr std::uint32_t kFirstPersonNodeCount = 76;
+
+// Torso anchoring constants, ported from RoboquestVR's arm rig. Roboquest
+// attaches its arms mesh to the HMD position but only the HMD yaw, and pushes
+// the mesh ~18 cm behind the camera so the shoulders sit where a torso would
+// be. The offsets below hang each shoulder from a yaw-only head frame:
+// head pitch or roll never swings the arm root, which is the main reason its
+// arms never cross the player's face. Distances are in meters (converted to
+// Blam units at use); tuned starting values, not calibration.
+constexpr float kShoulderBackMeters = 0.16f;
+constexpr float kShoulderDownMeters = 0.22f;
+constexpr float kShoulderLateralMeters = 0.17f;
+// When the tracked hand is beyond the authored arm's reach, slide the arm
+// root toward the target by up to this much (Roboquest gets the same effect
+// from a FABRIK chain rooted at the clavicle) before clamping the remainder.
+constexpr float kClavicleAssistMaxMeters = 0.12f;
+// The left wrist bone belongs behind the controller's grip point, not on it.
+// The OpenXR grip pose sits at the palm centroid; Roboquest offsets its wrist
+// targets a fixed distance back along the hand so knuckles, not the wrist,
+// land where the controller is held.
+constexpr float kGripToWristBackMeters = 0.08f;
+constexpr float kGripToWristDownMeters = 0.02f;
+
+// Two-handed hold, ported from Halo-MCC-VR's headset-tuned barrel grab. The
+// grab zone is a thin cylinder along the right-controller aim ray, measured
+// from the right grip position (the weapon's rear hand): 8-80 cm forward,
+// within 9 cm of the ray. Engaging requires the left grip button while the
+// left palm is inside the zone; the hold then persists until the button
+// releases, so the zone only gates acquisition, never retention.
+constexpr float kTwoHandZoneMinAlongMeters = 0.08f;
+constexpr float kTwoHandZoneMaxAlongMeters = 0.80f;
+constexpr float kTwoHandZoneRadiusMeters = 0.09f;
+// The two-hand influence fades in across this agreement band between the
+// hand-to-hand line and the right aim ray (Halo-MCC-VR hard-gates at 0.35;
+// a smoothstep band avoids the ~70 degree weapon snap its cutoff produces
+// when a latched support hand crosses the boundary). At or below the
+// minimum, aim is fully one-handed; at or above the full value, the
+// two-hand line has full authority.
+constexpr float kTwoHandMinimumAgreement = 0.35f;
+constexpr float kTwoHandFullAgreement = 0.50f;
+constexpr float kTwoHandBlendSeconds = 0.15f;
+constexpr bool kUseNativeChudCrosshairHide = false;
 
 struct Vec3 {
     float x{};
@@ -57,6 +107,79 @@ struct Quat {
     float z{};
     float w{1.0f};
 };
+
+struct UnrealVector {
+    double x{};
+    double y{};
+    double z{};
+};
+
+struct UnrealRotator {
+    double pitch{};
+    double yaw{};
+    double roll{};
+};
+
+struct UnrealVector2D {
+    double x{};
+    double y{};
+};
+
+struct UnrealIntPoint {
+    std::int32_t x{};
+    std::int32_t y{};
+};
+
+struct UnrealLinearColor {
+    float r{};
+    float g{};
+    float b{};
+    float a{};
+};
+
+constexpr double kWorldReticleScale = 1.0;
+constexpr float kWorldReticleEmissiveGain = 4.0f;
+
+template <typename T>
+bool write_function_parameter(
+    API::UFunction* function,
+    std::span<std::byte> buffer,
+    std::wstring_view name,
+    const T& value) {
+    if (function == nullptr) {
+        return false;
+    }
+    auto* const property = function->find_property(name);
+    if (property == nullptr || property->get_offset() < 0) {
+        return false;
+    }
+    const auto offset = static_cast<std::size_t>(property->get_offset());
+    if (offset + sizeof(T) > buffer.size()) {
+        return false;
+    }
+    std::memcpy(buffer.data() + offset, &value, sizeof(T));
+    return true;
+}
+
+template <typename T>
+T read_function_parameter(
+    API::UFunction* function,
+    std::span<const std::byte> buffer,
+    std::wstring_view name) {
+    T result{};
+    if (function == nullptr) {
+        return result;
+    }
+    auto* const property = function->find_property(name);
+    if (property == nullptr || property->get_offset() < 0) {
+        return result;
+    }
+    const auto offset = static_cast<std::size_t>(property->get_offset());
+    if (offset + sizeof(T) <= buffer.size()) {
+        std::memcpy(&result, buffer.data() + offset, sizeof(T));
+    }
+    return result;
+}
 
 struct Mat3 {
     Vec3 forward{1.0f, 0.0f, 0.0f};
@@ -117,9 +240,15 @@ struct TrackingSnapshot {
     Quat hmd_rotation{};
     Vec3 right_grip_position{};
     Quat right_grip_rotation{};
+    Vec3 right_aim_position{};
     Quat right_aim_rotation{};
     Vec3 left_grip_position{};
     Quat left_grip_rotation{};
+    Vec3 left_aim_position{};
+    Quat left_aim_rotation{};
+    std::int64_t predicted_display_time{};
+    std::int64_t predicted_display_period{};
+    bool late_located{};
     bool left_valid{};
     bool valid{};
 };
@@ -136,6 +265,12 @@ struct GetRootComponentParams {
     API::UObject* return_value{};
 };
 static_assert(sizeof(GetRootComponentParams) == 8);
+
+struct IsGamePausedParams {
+    API::UObject* world_context{};
+    bool return_value{};
+};
+static_assert(offsetof(IsGamePausedParams, return_value) == 8);
 
 struct GetComponentByClassParams {
     API::UClass* component_class{};
@@ -188,6 +323,9 @@ using ChudShowCrosshairFn = std::int64_t (*)(
 
 std::mutex g_tracking_mutex{};
 TrackingSnapshot g_tracking_snapshot{};
+std::mutex g_pose_diagnostics_mutex{};
+HaloCEVR_PoseDiagnostics g_pose_diagnostics{};
+std::atomic_uint32_t g_pose_diagnostic_sequence{};
 std::atomic<std::int32_t> g_local_weapon_index{
     kInvalidBlamObjectIndex};
 std::atomic_bool g_native_override_enabled{true};
@@ -204,10 +342,45 @@ std::atomic_uint32_t g_visual_diagnostic_count{};
 std::atomic_uint32_t g_visual_build_entry_count{};
 std::atomic_bool g_tracking_valid{};
 std::atomic_bool g_left_tracking_valid{};
+std::atomic_bool g_late_tracking_active{};
+std::atomic_bool g_late_tracking_logged{};
 std::atomic_bool g_visual_weapon_attached{};
 std::atomic_uintptr_t g_attached_component{};
+// Anchored-arm IK is the default: shoulders hang from a yaw-only head frame,
+// overreach slides the arm root forward (clavicle assist), and the wrist is
+// snapped exactly to the tracked pose afterwards, so the authored 0.635 m arm
+// can no longer leave hands behind. UEVR_HALO_ARM_IK=0 restores the previous
+// floating-hands mode (arms hidden, wrist-only placement).
 std::atomic_bool g_two_hand_ik_enabled{true};
 std::atomic_bool g_two_hand_ik_fallback_logged{};
+// Fixed controller-to-wrist axis convention for the left hand, latched from
+// the stock palette on the first tracked frame after each weapon change.
+// Reading it every frame let the running stock animation rotate the tracked
+// hand; latching per weapon keeps it the constant mapping it was always
+// meant to be. The matrix is written and read only on the first-person
+// build thread; the flag is atomic because the tick thread clears it when
+// the local weapon index changes.
+Mat3 g_left_wrist_stock_relative{};
+std::atomic_bool g_left_wrist_stock_latched{};
+// Two-handed hold state. The latch is decided once per engine tick from the
+// published tracking snapshot plus the left grip action; the blend eases the
+// weapon between one- and two-handed aim and is read by both the palette
+// build and the native fire path. UEVR_HALO_TWO_HAND_HOLD=0 disables it.
+std::atomic_bool g_two_hand_hold_enabled{true};
+std::atomic_bool g_two_hand_hold_latched{};
+std::atomic_bool g_two_hand_zone_active{};
+std::atomic<float> g_two_hand_hold_blend{};
+// Last valid HMD-relative two-hand forward (Blam axes). When left tracking
+// drops mid-hold, the blend tail eases out along this line instead of
+// snapping the weapon back to one-handed aim in a single frame.
+std::atomic<Vec3> g_two_hand_last_forward{};
+// True while Halo reports the local player zoomed. Sampled on the draw
+// thread (where the CHUD TLS is known-good) and consumed by the fire hooks:
+// scoped shots keep Halo's stock screen-center aim to match the restored
+// stock crosshair.
+std::atomic_bool g_local_zoomed{};
+std::atomic_bool g_game_paused{};
+std::atomic_int g_reticle_hide_published{-1};
 std::atomic_bool g_locomotion_bridge_observed{};
 
 TriggerCreateProjectilesFn g_original_trigger_create_projectiles{};
@@ -248,9 +421,11 @@ struct StockCrosshairState {
 StockCrosshairState g_stock_crosshair_state{};
 
 thread_local std::uint32_t g_local_fire_depth{};
+thread_local TrackingSnapshot g_local_fire_tracking{};
 struct LocalFireMarkerCorrection {
     BlamMatrix4x3 source{};
     BlamMatrix4x3 desired{};
+    Vec3 reticle_position{};
 };
 thread_local std::array<LocalFireMarkerCorrection, 64>
     g_local_fire_marker_corrections{};
@@ -259,7 +434,9 @@ struct LocalProjectileDirectionOverride {
     std::uint32_t object_index{};
     Vec3 source_direction{};
     Vec3 desired_direction{};
+    Vec3 reticle_position{};
     Mat3 delta_basis{};
+    bool primary_sweep_consumed{};
 };
 thread_local std::array<LocalProjectileDirectionOverride, 64>
     g_local_projectile_direction_overrides{};
@@ -381,6 +558,51 @@ void publish_gameplay_ready(bool ready, bool force = false) {
     CloseHandle(file);
 }
 
+// The Lua reticle polls this marker and hides the floating aim ball while
+// its ray would mislead: during a two-handed hold (shots follow the
+// hand-to-hand line, not the right-controller ray the ball is anchored to)
+// and while zoomed (scoped shots keep Halo's stock screen-center aim).
+// Written on transitions only.
+void publish_reticle_hide(bool hidden, bool force = false) {
+    const auto desired = hidden ? 1 : 0;
+    const auto previous = g_reticle_hide_published.exchange(
+        desired,
+        std::memory_order_acq_rel);
+    if (!force && previous == desired) {
+        return;
+    }
+
+    const auto marker =
+        profile_data_marker_path(L"halo_motion_reticle_hide.active");
+    if (marker.empty()) {
+        return;
+    }
+
+    const auto separator = marker.find_last_of(L"\\/");
+    if (separator != std::wstring::npos) {
+        const auto directory = marker.substr(0, separator);
+        CreateDirectoryW(directory.c_str(), nullptr);
+    }
+
+    const auto file = CreateFileW(
+        marker.c_str(),
+        GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        CREATE_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        return;
+    }
+
+    const char* const contents = hidden ? "on\n" : "off\n";
+    const auto length = static_cast<DWORD>(std::strlen(contents));
+    DWORD bytes_written = 0;
+    WriteFile(file, contents, length, &bytes_written, nullptr);
+    CloseHandle(file);
+}
+
 void refresh_replacement_reticle_state() {
     const auto marker = reticle_active_marker_path();
     bool active = false;
@@ -404,7 +626,11 @@ void refresh_replacement_reticle_state() {
                     &bytes_read,
                     nullptr) != FALSE &&
                 bytes_read == 5 &&
-                std::memcmp(contents.data(), "right", 5) == 0;
+                // Accept the production "right-controller ..." marker and
+                // the short-lived "umg-right-controller ..." prototype so
+                // an older profile cannot leave Halo's CHUD reticle visible.
+                (std::memcmp(contents.data(), "right", 5) == 0 ||
+                 std::memcmp(contents.data(), "umg-r", 5) == 0);
             CloseHandle(file);
         }
     }
@@ -497,7 +723,11 @@ void maintain_stock_crosshair() {
 
         bool zoomed{};
         const bool zoom_known = read_local_zoomed(tls, zoomed);
+        g_local_zoomed.store(
+            zoom_known && zoomed,
+            std::memory_order_release);
         const bool want_hidden =
+            kUseNativeChudCrosshairHide &&
             zoom_known &&
             !zoomed &&
             g_replacement_reticle_active.load(
@@ -564,6 +794,10 @@ void maintain_stock_crosshair() {
         g_native_crosshair_hide_supported.store(
             false,
             std::memory_order_release);
+        // Without the crosshair path there is no zoom sampling either; a
+        // stale "zoomed" reading here would silently disable the hand-aim
+        // redirect for the rest of the session.
+        g_local_zoomed.store(false, std::memory_order_release);
         API::get()->log_error(
             "HaloCEMotionControls: stock crosshair hide faulted and was "
             "disabled; native firing remains active");
@@ -753,6 +987,365 @@ bool valid_basis(const Mat3& value) {
            std::abs(dot(value.left, value.up)) < 0.2f;
 }
 
+bool valid_openxr_pose(const UEVR_TrackingPose& pose) {
+    constexpr unsigned long long orientation_valid = 1ULL << 0;
+    constexpr unsigned long long position_valid = 1ULL << 1;
+    constexpr auto required = orientation_valid | position_valid;
+    return (pose.location_flags & required) == required &&
+           finite(Vec3{
+               pose.position.x,
+               pose.position.y,
+               pose.position.z}) &&
+           finite(Quat{
+               pose.rotation.x,
+               pose.rotation.y,
+               pose.rotation.z,
+               pose.rotation.w});
+}
+
+TrackingSnapshot capture_tracking_snapshot() {
+    TrackingSnapshot snapshot{};
+
+    UEVR_LateTrackingSnapshot late{};
+    if (API::VR::is_openxr() &&
+        API::VR::get_late_tracking_snapshot(late) &&
+        valid_openxr_pose(late.hmd) &&
+        valid_openxr_pose(late.right_grip) &&
+        valid_openxr_pose(late.right_aim)) {
+        snapshot.hmd_position = {
+            late.hmd.position.x,
+            late.hmd.position.y,
+            late.hmd.position.z};
+        snapshot.hmd_rotation = {
+            late.hmd.rotation.x,
+            late.hmd.rotation.y,
+            late.hmd.rotation.z,
+            late.hmd.rotation.w};
+        snapshot.right_grip_position = {
+            late.right_grip.position.x,
+            late.right_grip.position.y,
+            late.right_grip.position.z};
+        snapshot.right_grip_rotation = {
+            late.right_grip.rotation.x,
+            late.right_grip.rotation.y,
+            late.right_grip.rotation.z,
+            late.right_grip.rotation.w};
+        snapshot.right_aim_position = {
+            late.right_aim.position.x,
+            late.right_aim.position.y,
+            late.right_aim.position.z};
+        snapshot.right_aim_rotation = {
+            late.right_aim.rotation.x,
+            late.right_aim.rotation.y,
+            late.right_aim.rotation.z,
+            late.right_aim.rotation.w};
+        snapshot.predicted_display_time =
+            late.predicted_display_time;
+        snapshot.predicted_display_period =
+            late.predicted_display_period;
+        snapshot.late_located = true;
+        snapshot.valid = true;
+
+        if (valid_openxr_pose(late.left_grip) &&
+            valid_openxr_pose(late.left_aim)) {
+            snapshot.left_grip_position = {
+                late.left_grip.position.x,
+                late.left_grip.position.y,
+                late.left_grip.position.z};
+            snapshot.left_grip_rotation = {
+                late.left_grip.rotation.x,
+                late.left_grip.rotation.y,
+                late.left_grip.rotation.z,
+                late.left_grip.rotation.w};
+            snapshot.left_aim_position = {
+                late.left_aim.position.x,
+                late.left_aim.position.y,
+                late.left_aim.position.z};
+            snapshot.left_aim_rotation = {
+                late.left_aim.rotation.x,
+                late.left_aim.rotation.y,
+                late.left_aim.rotation.z,
+                late.left_aim.rotation.w};
+            snapshot.left_valid = true;
+        }
+
+        g_late_tracking_active.store(true, std::memory_order_release);
+        if (!g_late_tracking_logged.exchange(
+                true,
+                std::memory_order_acq_rel)) {
+            API::get()->log_info(
+                "HaloCEMotionControls: coherent late OpenXR tracking is "
+                "active at predicted display time %lld (period %lld ns)",
+                static_cast<long long>(
+                    snapshot.predicted_display_time),
+                static_cast<long long>(
+                    snapshot.predicted_display_period));
+        }
+        return snapshot;
+    }
+
+    g_late_tracking_active.store(false, std::memory_order_release);
+    if (!API::VR::is_runtime_ready() || !API::VR::is_hmd_active()) {
+        return snapshot;
+    }
+
+    const auto hmd_index = API::VR::get_hmd_index();
+    const auto right_index = API::VR::get_right_controller_index();
+    const auto left_index = API::VR::get_left_controller_index();
+    if (hmd_index < 0 || hmd_index >= 64 || right_index < 0 ||
+        right_index >= 64) {
+        return snapshot;
+    }
+
+    const auto hmd = API::VR::get_pose(hmd_index);
+    const auto grip = API::VR::get_grip_pose(right_index);
+    const auto aim = API::VR::get_aim_pose(right_index);
+    snapshot.hmd_position = {
+        hmd.position.x,
+        hmd.position.y,
+        hmd.position.z};
+    snapshot.hmd_rotation = {
+        hmd.rotation.x,
+        hmd.rotation.y,
+        hmd.rotation.z,
+        hmd.rotation.w};
+    snapshot.right_grip_position = {
+        grip.position.x,
+        grip.position.y,
+        grip.position.z};
+    snapshot.right_grip_rotation = {
+        grip.rotation.x,
+        grip.rotation.y,
+        grip.rotation.z,
+        grip.rotation.w};
+    snapshot.right_aim_position = {
+        aim.position.x,
+        aim.position.y,
+        aim.position.z};
+    snapshot.right_aim_rotation = {
+        aim.rotation.x,
+        aim.rotation.y,
+        aim.rotation.z,
+        aim.rotation.w};
+    snapshot.valid =
+        finite(snapshot.hmd_position) &&
+        finite(snapshot.hmd_rotation) &&
+        finite(snapshot.right_grip_position) &&
+        finite(snapshot.right_grip_rotation) &&
+        finite(snapshot.right_aim_position) &&
+        finite(snapshot.right_aim_rotation);
+
+    if (left_index >= 0 && left_index < 64) {
+        const auto left_grip = API::VR::get_grip_pose(left_index);
+        const auto left_aim = API::VR::get_aim_pose(left_index);
+        snapshot.left_grip_position = {
+            left_grip.position.x,
+            left_grip.position.y,
+            left_grip.position.z};
+        snapshot.left_grip_rotation = {
+            left_grip.rotation.x,
+            left_grip.rotation.y,
+            left_grip.rotation.z,
+            left_grip.rotation.w};
+        snapshot.left_aim_position = {
+            left_aim.position.x,
+            left_aim.position.y,
+            left_aim.position.z};
+        snapshot.left_aim_rotation = {
+            left_aim.rotation.x,
+            left_aim.rotation.y,
+            left_aim.rotation.z,
+            left_aim.rotation.w};
+        snapshot.left_valid =
+            finite(snapshot.left_grip_position) &&
+            finite(snapshot.left_grip_rotation) &&
+            finite(snapshot.left_aim_position) &&
+            finite(snapshot.left_aim_rotation);
+    }
+
+    return snapshot;
+}
+
+void publish_tracking_snapshot(const TrackingSnapshot& snapshot) {
+    const std::scoped_lock lock{g_tracking_mutex};
+    g_tracking_snapshot = snapshot;
+    g_tracking_valid.store(snapshot.valid, std::memory_order_release);
+    g_left_tracking_valid.store(
+        snapshot.left_valid,
+        std::memory_order_release);
+}
+
+HaloCEVR_DiagnosticVec3 diagnostic(const Vec3& value) {
+    return {value.x, value.y, value.z};
+}
+
+HaloCEVR_DiagnosticQuat diagnostic(const Quat& value) {
+    return {value.x, value.y, value.z, value.w};
+}
+
+HaloCEVR_DiagnosticPose diagnostic(
+    const Vec3& position,
+    const Quat& rotation) {
+    return {diagnostic(position), diagnostic(rotation)};
+}
+
+HaloCEVR_DiagnosticMatrix diagnostic(const BlamMatrix4x3& value) {
+    return {
+        value.scale,
+        diagnostic(value.forward),
+        diagnostic(value.left),
+        diagnostic(value.up),
+        diagnostic(value.position)};
+}
+
+bool diagnostic_hand_geometry(
+    const BlamMatrix4x3* palette,
+    std::uint8_t wrist,
+    std::uint8_t index_finger,
+    std::uint8_t middle_finger,
+    std::uint8_t ring_finger,
+    std::uint8_t thumb,
+    std::uint8_t grip_end,
+    HaloCEVR_DiagnosticVec3& hand_forward,
+    HaloCEVR_DiagnosticVec3& thumb_side,
+    HaloCEVR_DiagnosticVec3& palm_normal,
+    HaloCEVR_DiagnosticVec3& grip_forward) {
+    const auto wrist_position = palette[wrist].position;
+    const auto finger_centroid =
+        (palette[index_finger].position +
+         palette[middle_finger].position +
+         palette[ring_finger].position) /
+        3.0f;
+    const auto forward = normalized(finger_centroid - wrist_position);
+    const auto thumb_delta = palette[thumb].position - wrist_position;
+    const auto side = normalized(
+        thumb_delta - forward * dot(forward, thumb_delta));
+    const auto normal = normalized(cross(forward, side));
+    const auto grip = normalized(
+        palette[grip_end].position - wrist_position);
+    if (!finite(forward) || !finite(side) || !finite(normal) ||
+        !finite(grip) || length_squared(forward) < 0.8f ||
+        length_squared(side) < 0.8f || length_squared(normal) < 0.8f ||
+        length_squared(grip) < 0.8f) {
+        return false;
+    }
+
+    hand_forward = diagnostic(forward);
+    thumb_side = diagnostic(side);
+    palm_normal = diagnostic(normal);
+    grip_forward = diagnostic(grip);
+    return true;
+}
+
+void record_visual_pose_diagnostics(
+    const TrackingSnapshot& tracking,
+    const BlamMatrix4x3* palette) {
+    if (palette == nullptr) {
+        return;
+    }
+
+    const auto sequence =
+        g_pose_diagnostic_sequence.fetch_add(1, std::memory_order_acq_rel) + 1;
+    const std::scoped_lock lock{g_pose_diagnostics_mutex};
+    auto& output = g_pose_diagnostics;
+    output.size = sizeof(output);
+    output.version = 1;
+    output.sequence = sequence;
+    output.flags |= kDiagnosticVisualValid;
+    if (tracking.left_valid) {
+        output.flags |= kDiagnosticLeftWristValid;
+    } else {
+        output.flags &= ~kDiagnosticLeftWristValid;
+    }
+    output.predicted_display_time = tracking.predicted_display_time;
+    output.predicted_display_period = tracking.predicted_display_period;
+    output.hmd = diagnostic(
+        tracking.hmd_position,
+        tracking.hmd_rotation);
+    output.right_grip = diagnostic(
+        tracking.right_grip_position,
+        tracking.right_grip_rotation);
+    output.right_aim = diagnostic(
+        tracking.right_aim_position,
+        tracking.right_aim_rotation);
+    output.left_grip = diagnostic(
+        tracking.left_grip_position,
+        tracking.left_grip_rotation);
+    output.left_aim = diagnostic(
+        tracking.left_aim_position,
+        tracking.left_aim_rotation);
+    output.root = diagnostic(palette[0]);
+    output.weapon = diagnostic(palette[8]);
+    output.right_wrist = diagnostic(palette[19]);
+    output.left_wrist = diagnostic(palette[25]);
+    if (diagnostic_hand_geometry(
+            palette,
+            19,
+            41,
+            36,
+            31,
+            37,
+            45,
+            output.right_hand_forward,
+            output.right_hand_thumb_side,
+            output.right_hand_palm_normal,
+            output.right_hand_grip_forward)) {
+        output.flags |= kDiagnosticRightHandGeometryValid;
+    } else {
+        output.flags &= ~kDiagnosticRightHandGeometryValid;
+    }
+    if (tracking.left_valid &&
+        diagnostic_hand_geometry(
+            palette,
+            25,
+            28,
+            33,
+            38,
+            32,
+            50,
+            output.left_hand_forward,
+            output.left_hand_thumb_side,
+            output.left_hand_palm_normal,
+            output.left_hand_grip_forward)) {
+        output.flags |= kDiagnosticLeftHandGeometryValid;
+    } else {
+        output.flags &= ~kDiagnosticLeftHandGeometryValid;
+    }
+    output.visual_override_count =
+        g_visual_override_count.load(std::memory_order_acquire) + 1;
+    output.marker_override_count =
+        g_marker_override_count.load(std::memory_order_acquire);
+    output.projectile_override_count =
+        g_override_count.load(std::memory_order_acquire);
+}
+
+void record_marker_pose_diagnostics(
+    const BlamMatrix4x3& marker,
+    const Vec3& reticle_position) {
+    const std::scoped_lock lock{g_pose_diagnostics_mutex};
+    g_pose_diagnostics.size = sizeof(g_pose_diagnostics);
+    g_pose_diagnostics.version = 1;
+    g_pose_diagnostics.flags |= kDiagnosticMarkerValid;
+    g_pose_diagnostics.muzzle_marker = diagnostic(marker);
+    g_pose_diagnostics.reticle_position = diagnostic(reticle_position);
+    g_pose_diagnostics.marker_override_count =
+        g_marker_override_count.load(std::memory_order_acquire) + 1;
+}
+
+void record_projectile_pose_diagnostics(const ProjectileNewData& projectile) {
+    const std::scoped_lock lock{g_pose_diagnostics_mutex};
+    g_pose_diagnostics.size = sizeof(g_pose_diagnostics);
+    g_pose_diagnostics.version = 1;
+    g_pose_diagnostics.flags |= kDiagnosticProjectileValid;
+    g_pose_diagnostics.projectile_position =
+        diagnostic(projectile.position);
+    g_pose_diagnostics.projectile_forward =
+        diagnostic(projectile.forward);
+    g_pose_diagnostics.projectile_up = diagnostic(projectile.up);
+    g_pose_diagnostics.projectile_override_count =
+        g_override_count.load(std::memory_order_acquire) + 1;
+}
+
 // OpenXR stage coordinates are +X right, +Y up, -Z forward. Halo CE's
 // Blam coordinates are +X forward, +Y left, +Z up.
 Vec3 openxr_to_blam(const Vec3& value) {
@@ -766,10 +1359,87 @@ Mat3 openxr_rotation_to_blam_basis(const Quat& rotation) {
         openxr_to_blam(rotate(rotation, {0.0f, 1.0f, 0.0f}))};
 }
 
+// The controller basis both the visual weapon and the native fire path aim
+// with. One-handed this is the right aim rotation as before. While the
+// two-handed hold is engaged, the forward axis eases onto the line from the
+// right grip to the left grip (Halo-MCC-VR's two-hand aim), with roll still
+// taken from the right controller. Sharing this one function between the
+// palette build and the marker/projectile hooks keeps the rendered barrel,
+// the muzzle ray, and the collision sweep on the same line while blending.
+Mat3 effective_controller_basis(
+    const TrackingSnapshot& tracking,
+    const Quat& inverse_hmd_rotation,
+    const Quat& aim_relative_xr) {
+    const auto one_hand = openxr_rotation_to_blam_basis(aim_relative_xr);
+    const auto blend =
+        g_two_hand_hold_blend.load(std::memory_order_relaxed);
+    if (blend <= 0.0f || !valid_basis(one_hand)) {
+        return one_hand;
+    }
+
+    // Hand-to-hand line in the same HMD-relative frame as the aim rotation.
+    // If left tracking drops mid-hold, ease the blend tail out along the
+    // last tracked line instead of snapping back to one-handed aim.
+    Vec3 two_hand_forward{};
+    if (tracking.left_valid) {
+        const auto hand_line_xr = rotate(
+            inverse_hmd_rotation,
+            tracking.left_grip_position - tracking.right_grip_position);
+        two_hand_forward = openxr_to_blam(hand_line_xr);
+        const auto line_length_squared = length_squared(two_hand_forward);
+        if (!finite(two_hand_forward) || line_length_squared < 1.0e-6f) {
+            return one_hand;
+        }
+        two_hand_forward =
+            two_hand_forward / std::sqrt(line_length_squared);
+        g_two_hand_last_forward.store(
+            two_hand_forward,
+            std::memory_order_relaxed);
+    } else {
+        two_hand_forward = g_two_hand_last_forward.load(
+            std::memory_order_relaxed);
+        if (!finite(two_hand_forward) ||
+            length_squared(two_hand_forward) < 0.5f) {
+            return one_hand;
+        }
+    }
+
+    // Fade the two-hand influence in across the agreement band rather than
+    // hard-gating: below the minimum aim is exactly one-handed, and the
+    // smoothstep keeps the transition continuous when a latched support
+    // hand crosses the boundary.
+    const auto agreement = dot(two_hand_forward, one_hand.forward);
+    if (!std::isfinite(agreement) ||
+        agreement < kTwoHandMinimumAgreement) {
+        return one_hand;
+    }
+    const auto band = std::clamp(
+        (agreement - kTwoHandMinimumAgreement) /
+            (kTwoHandFullAgreement - kTwoHandMinimumAgreement),
+        0.0f,
+        1.0f);
+    const auto weight = blend * band * band * (3.0f - 2.0f * band);
+
+    const auto blended_forward = normalized(
+        one_hand.forward +
+        (two_hand_forward - one_hand.forward) * weight);
+    auto blended_left = cross(one_hand.up, blended_forward);
+    if (!finite(blended_forward) ||
+        length_squared(blended_left) < 1.0e-6f) {
+        return one_hand;
+    }
+    blended_left = normalized(blended_left);
+    const auto blended_up = normalized(
+        cross(blended_forward, blended_left));
+    const Mat3 result{blended_forward, blended_left, blended_up};
+    return valid_basis(result) ? result : one_hand;
+}
+
 bool build_controller_marker(
     const MarkerResult& source,
     const TrackingSnapshot& tracking,
-    BlamMatrix4x3& destination) {
+    BlamMatrix4x3& destination,
+    Vec3& reticle_position) {
     if (!tracking.valid || !finite(source.local.position) ||
         !finite(source.world.position)) {
         return false;
@@ -808,8 +1478,8 @@ bool build_controller_marker(
         return false;
     }
 
-    const auto controller_basis =
-        openxr_rotation_to_blam_basis(aim_relative_xr);
+    const auto controller_basis = effective_controller_basis(
+        tracking, inverse_hmd_rotation, aim_relative_xr);
     if (!valid_basis(controller_basis)) {
         return false;
     }
@@ -821,15 +1491,29 @@ bool build_controller_marker(
         root_position + transform_vector(root_basis, grip_delta_blam);
 
     destination = source.world;
-    destination.forward = normalized(
-        transform_vector(desired_root_basis, source.local.forward));
-    destination.left = normalized(
-        transform_vector(desired_root_basis, source.local.left));
-    destination.up = normalized(
-        transform_vector(desired_root_basis, source.local.up));
     destination.position =
         desired_root_position +
         transform_vector(desired_root_basis, source.local.position);
+
+    // The visible ball is ten metres along the controller aim ray, but a
+    // projectile begins at the weapon's displaced muzzle. Aim the native
+    // marker at that exact convergence point instead of keeping the muzzle
+    // ray merely parallel to the controller ray. Otherwise the two rays
+    // retain their grip-to-muzzle lateral offset and never actually meet.
+    constexpr float kReticleDistanceMeters = 10.0f;
+    reticle_position =
+        desired_root_position +
+        desired_root_basis.forward *
+            (kReticleDistanceMeters / kMetersPerBlamUnit);
+    const auto converged_forward =
+        normalized(reticle_position - destination.position);
+    const auto converged_left = normalized(
+        cross(desired_root_basis.up, converged_forward));
+    const auto converged_up =
+        normalized(cross(converged_forward, converged_left));
+    destination.forward = converged_forward;
+    destination.left = converged_left;
+    destination.up = converged_up;
 
     return finite(destination.position) &&
            valid_basis(orthonormal_basis(destination));
@@ -875,6 +1559,92 @@ void apply_rigid_delta(
     }
 }
 
+bool place_wrist_subtree(
+    BlamMatrix4x3* palette,
+    std::uint8_t wrist_node,
+    std::span<const std::uint8_t> wrist_nodes,
+    const Vec3& requested_wrist_position,
+    const Mat3& desired_wrist_basis) {
+    if (palette == nullptr || !finite(requested_wrist_position) ||
+        !valid_basis(desired_wrist_basis)) {
+        return false;
+    }
+
+    const auto source_wrist_position = palette[wrist_node].position;
+    const auto source_wrist_basis =
+        orthonormal_basis(palette[wrist_node]);
+    const auto rotation = multiply(
+        desired_wrist_basis,
+        transpose(source_wrist_basis));
+    if (!finite(source_wrist_position) ||
+        !valid_basis(source_wrist_basis) ||
+        !valid_basis(rotation)) {
+        return false;
+    }
+
+    const auto translation =
+        requested_wrist_position -
+        transform_vector(rotation, source_wrist_position);
+    if (!finite(translation)) {
+        return false;
+    }
+
+    for (const auto node : wrist_nodes) {
+        auto& matrix = palette[node];
+        matrix.forward =
+            normalized(transform_vector(rotation, matrix.forward));
+        matrix.left =
+            normalized(transform_vector(rotation, matrix.left));
+        matrix.up =
+            normalized(transform_vector(rotation, matrix.up));
+        matrix.position =
+            translation + transform_vector(rotation, matrix.position);
+    }
+
+    return length_squared(
+               palette[wrist_node].position - requested_wrist_position) <
+           1.0e-8f;
+}
+
+bool place_floating_hand_only(
+    BlamMatrix4x3* palette,
+    std::uint8_t wrist_node,
+    std::span<const std::uint8_t> arm_nodes,
+    std::span<const std::uint8_t> wrist_nodes,
+    const Vec3& requested_wrist_position,
+    const Mat3& desired_wrist_basis) {
+    if (!place_wrist_subtree(
+            palette,
+            wrist_node,
+            wrist_nodes,
+            requested_wrist_position,
+            desired_wrist_basis)) {
+        return false;
+    }
+
+    // Floating-hands mode must not let Halo's authored arm length influence
+    // the tracked wrist. Collapse every non-hand arm bone into the wrist
+    // instead of solving/clamping an IK chain and stretching the seam back to
+    // the exact controller pose. Keeping a tiny finite scale avoids singular
+    // palette entries while hiding the upper-arm/forearm geometry inside the
+    // controller-owned hand.
+    constexpr float kHiddenArmScale = 1.0e-4f;
+    for (const auto node : arm_nodes) {
+        if (std::find(wrist_nodes.begin(), wrist_nodes.end(), node) !=
+            wrist_nodes.end()) {
+            continue;
+        }
+
+        auto& matrix = palette[node];
+        matrix.scale = kHiddenArmScale;
+        matrix.forward = desired_wrist_basis.forward;
+        matrix.left = desired_wrist_basis.left;
+        matrix.up = desired_wrist_basis.up;
+        matrix.position = requested_wrist_position;
+    }
+    return true;
+}
+
 bool solve_two_bone_arm(
     BlamMatrix4x3* palette,
     std::uint8_t shoulder_node,
@@ -886,8 +1656,8 @@ bool solve_two_bone_arm(
     const Vec3& requested_wrist_position,
     const Mat3& desired_wrist_basis,
     const Vec3& fallback_pole) {
-    const auto shoulder_position = palette[shoulder_node].position;
-    const auto elbow_position = palette[elbow_node].position;
+    auto shoulder_position = palette[shoulder_node].position;
+    auto elbow_position = palette[elbow_node].position;
     const auto wrist_position = palette[wrist_node].position;
     const auto upper_length = std::sqrt(
         length_squared(elbow_position - shoulder_position));
@@ -911,6 +1681,25 @@ bool solve_two_bone_arm(
         std::abs(upper_length - lower_length) + 1.0e-4f;
     const auto maximum_reach =
         upper_length + lower_length - 1.0e-4f;
+
+    // Clavicle assist: instead of stopping the hand at the reach sphere,
+    // slide the whole arm root toward an out-of-reach target, the way
+    // Roboquest's clavicle-rooted FABRIK chain rolls the shoulder into an
+    // overreach. The remaining shortfall is clamped as before and absorbed
+    // by the caller's exact wrist placement.
+    const auto overshoot = target_distance - maximum_reach;
+    if (overshoot > 0.0f) {
+        const auto assist = std::min(
+            overshoot, kClavicleAssistMaxMeters / kMetersPerBlamUnit);
+        const auto assist_offset = target_direction * assist;
+        for (const auto node : shoulder_nodes) {
+            palette[node].position = palette[node].position + assist_offset;
+        }
+        shoulder_position = shoulder_position + assist_offset;
+        elbow_position = elbow_position + assist_offset;
+        target_distance -= assist;
+    }
+
     target_distance =
         std::clamp(target_distance, minimum_reach, maximum_reach);
     const auto wrist_target =
@@ -985,6 +1774,113 @@ bool solve_two_bone_arm(
     return true;
 }
 
+bool solve_visual_arm_for_floating_wrist(
+    BlamMatrix4x3* palette,
+    std::uint8_t shoulder_node,
+    std::uint8_t elbow_node,
+    std::uint8_t wrist_node,
+    std::span<const std::uint8_t> shoulder_nodes,
+    std::span<const std::uint8_t> elbow_nodes,
+    std::span<const std::uint8_t> wrist_nodes,
+    const Vec3& requested_wrist_position,
+    const Mat3& desired_wrist_basis,
+    const Vec3& fallback_pole) {
+    if (palette == nullptr) {
+        return false;
+    }
+
+    // The arm solve is cosmetic; the wrist is controller-owned. Solve on a
+    // temporary palette so a degenerate or partially-applied arm solution can
+    // never disturb the tracked hand. If it succeeds, reapply the exact
+    // floating-wrist transform last; this makes shoulder/elbow reach purely
+    // visual and keeps the wrist at the tracked pose even beyond Halo's
+    // authored arm length (the clavicle assist inside the solver closes most
+    // of that gap first).
+    std::array<BlamMatrix4x3, kFirstPersonNodeCount> visual_palette{};
+    std::copy_n(
+        palette,
+        kFirstPersonNodeCount,
+        visual_palette.begin());
+    if (solve_two_bone_arm(
+            visual_palette.data(),
+            shoulder_node,
+            elbow_node,
+            wrist_node,
+            shoulder_nodes,
+            elbow_nodes,
+            wrist_nodes,
+            requested_wrist_position,
+            desired_wrist_basis,
+            fallback_pole) &&
+        place_wrist_subtree(
+            visual_palette.data(),
+            wrist_node,
+            wrist_nodes,
+            requested_wrist_position,
+            desired_wrist_basis)) {
+        std::copy(
+            visual_palette.begin(),
+            visual_palette.end(),
+            palette);
+        return true;
+    }
+
+    // The floating hand remains authoritative if the visual arm cannot solve.
+    return place_wrist_subtree(
+        palette,
+        wrist_node,
+        wrist_nodes,
+        requested_wrist_position,
+        desired_wrist_basis);
+}
+
+// Yaw-only torso frame derived from the view root, after RoboquestVR's
+// UpdateFPSMeshTransform: the arms rig follows the head's position and yaw
+// but never its pitch or roll, so looking down does not rotate the shoulders
+// down into the player's view.
+Mat3 torso_basis_from_root(const Mat3& root_basis) {
+    Vec3 flat_forward{
+        root_basis.forward.x, root_basis.forward.y, 0.0f};
+    if (length_squared(flat_forward) < 1.0e-6f) {
+        // Looking straight up or down: the camera up axis carries the yaw.
+        const auto sign = root_basis.forward.z <= 0.0f ? 1.0f : -1.0f;
+        flat_forward = {
+            root_basis.up.x * sign, root_basis.up.y * sign, 0.0f};
+    }
+    flat_forward = normalized(flat_forward);
+    constexpr Vec3 up{0.0f, 0.0f, 1.0f};
+    return Mat3{flat_forward, cross(up, flat_forward), up};
+}
+
+// Rigidly translate an arm subtree so its shoulder hangs from the yaw-only
+// torso frame at a fixed human-proportioned offset behind and below the
+// head, instead of wherever Halo's camera-glued stock viewmodel put it this
+// frame. Pure translation: the stock pose within the arm is preserved for
+// the IK solve that follows.
+bool anchor_shoulder_to_torso(
+    BlamMatrix4x3* palette,
+    std::uint8_t shoulder_node,
+    std::span<const std::uint8_t> arm_nodes,
+    const Mat3& torso_basis,
+    const Vec3& head_position,
+    bool left_side) {
+    const Vec3 local_offset{
+        -kShoulderBackMeters / kMetersPerBlamUnit,
+        (left_side ? kShoulderLateralMeters : -kShoulderLateralMeters) /
+            kMetersPerBlamUnit,
+        -kShoulderDownMeters / kMetersPerBlamUnit};
+    const auto anchor =
+        head_position + transform_vector(torso_basis, local_offset);
+    const auto shift = anchor - palette[shoulder_node].position;
+    if (!finite(shift)) {
+        return false;
+    }
+    for (const auto node : arm_nodes) {
+        palette[node].position = palette[node].position + shift;
+    }
+    return true;
+}
+
 bool apply_split_controllers_to_first_person_palette(
     BlamMatrix4x3* palette,
     std::int32_t count,
@@ -1032,8 +1928,8 @@ bool apply_split_controllers_to_first_person_palette(
         return false;
     }
 
-    const auto controller_basis =
-        openxr_rotation_to_blam_basis(aim_relative_xr);
+    const auto controller_basis = effective_controller_basis(
+        tracking, inverse_hmd_rotation, aim_relative_xr);
     if (!valid_basis(controller_basis)) {
         return false;
     }
@@ -1109,6 +2005,9 @@ bool apply_split_controllers_to_first_person_palette(
     constexpr std::array<std::uint8_t, 24> left_wrist_nodes{
         25, 28, 29, 32, 33, 38, 39, 42, 46, 47, 50, 51,
         52, 54, 57, 58, 61, 62, 64, 67, 68, 71, 72, 75};
+    const auto use_arm_ik =
+        g_two_hand_ik_enabled.load(std::memory_order_relaxed);
+    const auto torso_basis = torso_basis_from_root(root_basis);
 
     const auto source_right_wrist_basis =
         orthonormal_basis(palette[19]);
@@ -1117,17 +2016,39 @@ bool apply_split_controllers_to_first_person_palette(
         transform_vector(delta_basis, palette[19].position);
     const auto right_wrist_basis =
         multiply(delta_basis, source_right_wrist_basis);
-    if (!solve_two_bone_arm(
+    // Anchor after the wrist target is captured from the stock pose: the
+    // target belongs to the controller, not to the relocated arm.
+    if (use_arm_ik &&
+        !anchor_shoulder_to_torso(
             palette,
             5,
-            16,
-            19,
             right_shoulder_nodes,
-            right_elbow_nodes,
-            right_wrist_nodes,
-            right_wrist_target,
-            right_wrist_basis,
-            root_basis.up)) {
+            torso_basis,
+            palette[0].position,
+            false)) {
+        return false;
+    }
+    const auto right_hand_placed =
+        use_arm_ik
+        ? solve_visual_arm_for_floating_wrist(
+              palette,
+              5,
+              16,
+              19,
+              right_shoulder_nodes,
+              right_elbow_nodes,
+              right_wrist_nodes,
+              right_wrist_target,
+              right_wrist_basis,
+              root_basis.up)
+        : place_floating_hand_only(
+              palette,
+              19,
+              right_shoulder_nodes,
+              right_wrist_nodes,
+              right_wrist_target,
+              right_wrist_basis);
+    if (!right_hand_placed) {
         return false;
     }
 
@@ -1141,31 +2062,73 @@ bool apply_split_controllers_to_first_person_palette(
             normalized(inverse_hmd_rotation * left_grip_rotation);
         const auto left_controller_basis =
             openxr_rotation_to_blam_basis(left_relative_xr);
-        const auto stock_left_wrist_basis =
-            orthonormal_basis(palette[25]);
-        const auto stock_left_wrist_relative =
-            multiply(transpose(root_basis), stock_left_wrist_basis);
+        // The stock wrist-to-view orientation is the constant that maps
+        // controller axes onto Halo's left wrist bone convention. Latch it
+        // once: re-reading it every frame leaked the running stock animation
+        // into the tracked hand as a per-frame rotation wobble.
+        if (!g_left_wrist_stock_latched.load(std::memory_order_acquire)) {
+            const auto stock_left_wrist_basis =
+                orthonormal_basis(palette[25]);
+            if (!valid_basis(stock_left_wrist_basis)) {
+                return false;
+            }
+            g_left_wrist_stock_relative =
+                multiply(transpose(root_basis), stock_left_wrist_basis);
+            g_left_wrist_stock_latched.store(
+                true, std::memory_order_release);
+        }
         const auto desired_left_wrist_basis = multiply(
             multiply(root_basis, left_controller_basis),
-            stock_left_wrist_relative);
+            g_left_wrist_stock_relative);
         const auto left_grip_delta_blam =
             openxr_to_blam(left_grip_delta_xr) / kMetersPerBlamUnit;
+        // Place the wrist bone behind the grip point rather than on it: the
+        // OpenXR grip pose is the palm centroid, and Roboquest-style fixed
+        // offsets in controller space put the knuckles on the controller
+        // with no per-user calibration.
+        const Vec3 left_wrist_local_offset{
+            -kGripToWristBackMeters / kMetersPerBlamUnit,
+            0.0f,
+            -kGripToWristDownMeters / kMetersPerBlamUnit};
         const auto left_wrist_target =
             palette[0].position +
-            transform_vector(root_basis, left_grip_delta_blam);
-        if (!finite(left_grip_delta_xr) ||
-            !valid_basis(left_controller_basis) ||
-            !solve_two_bone_arm(
+            transform_vector(root_basis, left_grip_delta_blam) +
+            transform_vector(
+                multiply(root_basis, left_controller_basis),
+                left_wrist_local_offset);
+        if (use_arm_ik &&
+            !anchor_shoulder_to_torso(
                 palette,
                 6,
-                9,
-                25,
                 left_shoulder_nodes,
-                left_elbow_nodes,
-                left_wrist_nodes,
-                left_wrist_target,
-                desired_left_wrist_basis,
-                root_basis.up)) {
+                torso_basis,
+                palette[0].position,
+                true)) {
+            return false;
+        }
+        const auto left_hand_placed =
+            use_arm_ik
+            ? solve_visual_arm_for_floating_wrist(
+                  palette,
+                  6,
+                  9,
+                  25,
+                  left_shoulder_nodes,
+                  left_elbow_nodes,
+                  left_wrist_nodes,
+                  left_wrist_target,
+                  desired_left_wrist_basis,
+                  root_basis.up)
+            : place_floating_hand_only(
+                  palette,
+                  25,
+                  left_shoulder_nodes,
+                  left_wrist_nodes,
+                  left_wrist_target,
+                  desired_left_wrist_basis);
+        if (!finite(left_grip_delta_xr) ||
+            !valid_basis(left_controller_basis) ||
+            !left_hand_placed) {
             return false;
         }
     }
@@ -1206,8 +2169,11 @@ bool apply_legacy_controller_to_first_person_palette(
         tracking.right_grip_position - tracking.hmd_position);
     const auto aim_relative_xr =
         normalized(inverse_hmd_rotation * aim_rotation);
-    const auto controller_basis =
-        openxr_rotation_to_blam_basis(aim_relative_xr);
+    // Share the two-hand-aware basis with the split path and the fire
+    // hooks: this fallback must not render a one-handed weapon while the
+    // native muzzle keeps following the hand-to-hand line.
+    const auto controller_basis = effective_controller_basis(
+        tracking, inverse_hmd_rotation, aim_relative_xr);
     const Mat3 visual_weapon_basis{
         controller_basis.left * -1.0f,
         controller_basis.forward,
@@ -1273,20 +2239,18 @@ bool apply_controller_to_first_person_palette(
 
     std::array<BlamMatrix4x3, kFirstPersonNodeCount> stock{};
     std::copy_n(palette, kFirstPersonNodeCount, stock.begin());
-    if (g_two_hand_ik_enabled.load(std::memory_order_relaxed) &&
-        apply_split_controllers_to_first_person_palette(
+    if (apply_split_controllers_to_first_person_palette(
             palette,
             count,
             tracking)) {
         return true;
     }
 
-    if (g_two_hand_ik_enabled.load(std::memory_order_relaxed) &&
-        !g_two_hand_ik_fallback_logged.exchange(
+    if (!g_two_hand_ik_fallback_logged.exchange(
             true,
             std::memory_order_relaxed)) {
         API::get()->log_warn(
-            "HaloCEMotionControls: split arm IK rejected this palette; "
+            "HaloCEMotionControls: split hand placement rejected this palette; "
             "restoring it and using the validated rigid right-hand path");
     }
     std::copy(stock.begin(), stock.end(), palette);
@@ -1405,18 +2369,18 @@ std::int16_t hook_get_markers(
         unused_context,
         use_interpolated_transform);
 
+    // While zoomed the stock crosshair is restored, so scoped shots keep
+    // Halo's stock screen-center aim: skipping the marker rewrite leaves no
+    // corrections for the projectile/sweep hooks to apply either.
     if (!g_native_override_enabled.load(std::memory_order_relaxed) ||
+        g_local_zoomed.load(std::memory_order_acquire) ||
         g_local_fire_depth == 0 || return_address != g_primary_marker_return ||
         maximum_count != 64 || output == nullptr || count <= 0 ||
         count > static_cast<std::int16_t>(maximum_count)) {
         return count;
     }
 
-    TrackingSnapshot tracking{};
-    {
-        const std::scoped_lock lock{g_tracking_mutex};
-        tracking = g_tracking_snapshot;
-    }
+    const auto tracking = g_local_fire_tracking;
     if (!tracking.valid) {
         return count;
     }
@@ -1427,13 +2391,19 @@ std::int16_t hook_get_markers(
     bool have_first_rewrite{};
     for (std::int16_t index = 0; index < count; ++index) {
         BlamMatrix4x3 desired{};
-        if (!build_controller_marker(output[index], tracking, desired)) {
+        Vec3 reticle_position{};
+        if (!build_controller_marker(
+                output[index],
+                tracking,
+                desired,
+                reticle_position)) {
             continue;
         }
 
         if (!have_first_rewrite) {
             first_source = output[index].world;
             first_desired = desired;
+            record_marker_pose_diagnostics(desired, reticle_position);
             have_first_rewrite = true;
         }
         if (g_local_fire_marker_correction_count <
@@ -1441,7 +2411,8 @@ std::int16_t hook_get_markers(
             g_local_fire_marker_corrections
                 [g_local_fire_marker_correction_count++] = {
                     output[index].world,
-                    desired};
+                    desired,
+                    reticle_position};
         }
         output[index].world = desired;
         ++rewritten;
@@ -1484,6 +2455,8 @@ std::int64_t hook_projectile_new(ProjectileNewData* data) {
     Mat3 applied_delta{};
     Vec3 source_forward{};
     Vec3 desired_forward{};
+    Vec3 center_forward{};
+    Vec3 reticle_position{};
     bool have_applied_delta = false;
 
     const auto* return_address = _ReturnAddress();
@@ -1522,27 +2495,64 @@ std::int64_t hook_projectile_new(ProjectileNewData* data) {
             normalized(transform_vector(delta_basis, data->up));
         const auto desired_velocity =
             transform_vector(delta_basis, data->velocity);
+        const auto converged_center_forward = normalized(
+            correction->reticle_position - data->position);
+        const auto converged_center_left = normalized(
+            cross(desired_basis.up, converged_center_forward));
+        const auto converged_center_up = normalized(
+            cross(converged_center_forward, converged_center_left));
+        const Mat3 converged_center_basis{
+            converged_center_forward,
+            converged_center_left,
+            converged_center_up};
+        const auto convergence_delta = multiply(
+            converged_center_basis,
+            transpose(desired_basis));
+        const auto final_forward = normalized(
+            transform_vector(convergence_delta, corrected_forward));
+        const auto final_up = normalized(
+            transform_vector(convergence_delta, desired_up));
+        const auto final_velocity =
+            transform_vector(convergence_delta, desired_velocity);
+        const auto final_delta =
+            multiply(convergence_delta, delta_basis);
         if (valid_basis(source_basis) && valid_basis(desired_basis) &&
-            valid_basis(delta_basis) && finite(data->position) &&
+            valid_basis(delta_basis) &&
+            valid_basis(converged_center_basis) &&
+            valid_basis(convergence_delta) &&
+            valid_basis(final_delta) && finite(data->position) &&
              finite(data->forward) && finite(data->up) &&
              finite(data->velocity) && finite(corrected_forward) &&
              finite(desired_up) && finite(desired_velocity) &&
-             length_squared(corrected_forward) > 0.8f &&
-             length_squared(desired_up) > 0.8f) {
+             finite(converged_center_forward) &&
+             finite(final_forward) && finite(final_up) &&
+             finite(final_velocity) &&
+             length_squared(final_forward) > 0.8f &&
+             length_squared(converged_center_forward) > 0.8f &&
+             length_squared(final_up) > 0.8f) {
             source_forward = data->forward;
             const auto source_up = data->up;
             const auto source_velocity = data->velocity;
-            desired_forward = corrected_forward;
-            applied_delta = delta_basis;
+            desired_forward = final_forward;
+            center_forward = converged_center_forward;
+            reticle_position = correction->reticle_position;
+            applied_delta = final_delta;
             have_applied_delta = true;
 
-            data->forward = corrected_forward;
-            data->up = desired_up;
+            // Preserve the weapon's authored spread within the controller
+            // cone, then recenter that cone from the projectile's real spawn
+            // point onto the same ten-metre target used by the world reticle.
+            // Previously this convergence was deferred to the first collision
+            // sweep, so the visible projectile and its initial velocity could
+            // travel several degrees away from the ring.
+            data->forward = final_forward;
+            data->up = final_up;
             // Some projectile types already carry inherited velocity in the
             // placement. Rotate it here, then also correct the spawned
             // object's tag-derived velocity after object_new returns.
-            data->velocity = desired_velocity;
+            data->velocity = final_velocity;
 
+            record_projectile_pose_diagnostics(*data);
             const auto total = g_override_count.fetch_add(
                                    1,
                                    std::memory_order_relaxed) +
@@ -1591,8 +2601,10 @@ std::int64_t hook_projectile_new(ProjectileNewData* data) {
                 [g_local_projectile_direction_override_count++] = {
                     static_cast<std::uint32_t>(result),
                     normalized(source_forward),
-                    normalized(desired_forward),
-                    applied_delta};
+                    normalized(center_forward),
+                    reticle_position,
+                    applied_delta,
+                    false};
         }
 
         auto* const object =
@@ -1624,7 +2636,6 @@ std::int64_t hook_projectile_new(ProjectileNewData* data) {
                     finite(corrected_velocity)) {
                     object->velocity = corrected_velocity;
                 }
-
                 const auto total =
                     g_override_count.load(std::memory_order_relaxed);
                 if (total <= 32) {
@@ -1668,11 +2679,11 @@ std::int64_t hook_projectile_collision_sweep(
         (return_address == g_projectile_primary_sweep_return ||
          return_address == g_projectile_spread_sweep_return) &&
         start != nullptr && end != nullptr) {
-        const LocalProjectileDirectionOverride* direction_override = nullptr;
+        LocalProjectileDirectionOverride* direction_override = nullptr;
         for (std::uint16_t index = 0;
              index < g_local_projectile_direction_override_count;
              ++index) {
-            const auto& candidate =
+            auto& candidate =
                 g_local_projectile_direction_overrides[index];
             if (candidate.object_index == projectile_object_index) {
                 direction_override = &candidate;
@@ -1683,6 +2694,7 @@ std::int64_t hook_projectile_collision_sweep(
         if (direction_override != nullptr && finite(*start) && finite(*end) &&
             finite(direction_override->source_direction) &&
             finite(direction_override->desired_direction) &&
+            finite(direction_override->reticle_position) &&
             valid_basis(direction_override->delta_basis)) {
             const auto original_delta = *end - *start;
             const auto distance_squared = length_squared(original_delta);
@@ -1699,15 +2711,24 @@ std::int64_t hook_projectile_collision_sweep(
                     original_direction,
                     direction_override->desired_direction);
 
-                // projectile_new often makes the primary first-tick sweep
-                // controller-aligned before it reaches this hook. Leave that
-                // ray alone. Halo's conical multi-ray path (shotgun spread)
-                // can still build its vectors around the original game aim;
-                // rotate each of those vectors by the complete source-to-hand
-                // basis delta so the cone and each ray's length survive.
+                // Only the first normal first-tick sweep is the center ray
+                // represented by the visible ball. Halo can call the same
+                // site again for post-impact/substep work, so consume it once
+                // per projectile. The separate spread callsite keeps its
+                // authored cone and receives only the source-to-hand delta.
                 auto corrected_direction = original_direction;
                 bool rotated = false;
-                if (source_alignment > 0.70f &&
+                const auto primary_center_sweep =
+                    return_address == g_projectile_primary_sweep_return &&
+                    !direction_override->primary_sweep_consumed;
+                if (primary_center_sweep) {
+                    corrected_direction = normalized(
+                        direction_override->reticle_position - *start);
+                    direction_override->primary_sweep_consumed = true;
+                    rotated =
+                        finite(corrected_direction) &&
+                        length_squared(corrected_direction) > 0.8f;
+                } else if (source_alignment > 0.70f &&
                     source_alignment > desired_alignment + 0.02f) {
                     corrected_direction = normalized(transform_vector(
                         direction_override->delta_basis,
@@ -1719,6 +2740,21 @@ std::int64_t hook_projectile_collision_sweep(
 
                 if (rotated) {
                     *end = *start + corrected_direction * distance;
+                }
+                if (primary_center_sweep && rotated) {
+                    auto* const object = get_native_object(
+                        static_cast<std::int32_t>(projectile_object_index));
+                    if (object != nullptr && finite(object->velocity)) {
+                        const auto speed_squared =
+                            length_squared(object->velocity);
+                        if (std::isfinite(speed_squared) &&
+                            speed_squared > 0.0001f) {
+                            object->velocity =
+                                corrected_direction *
+                                std::sqrt(speed_squared);
+                        }
+                        object->forward = corrected_direction;
+                    }
                 }
 
                 const auto total =
@@ -1786,6 +2822,13 @@ std::int16_t hook_trigger_create_projectiles(
     if (outermost_local_fire) {
         g_local_fire_marker_correction_count = 0;
         g_local_projectile_direction_override_count = 0;
+        g_local_fire_tracking = capture_tracking_snapshot();
+        if (g_local_fire_tracking.valid) {
+            publish_tracking_snapshot(g_local_fire_tracking);
+        } else {
+            const std::scoped_lock lock{g_tracking_mutex};
+            g_local_fire_tracking = g_tracking_snapshot;
+        }
     }
     if (is_local) {
         ++g_local_fire_depth;
@@ -1803,6 +2846,7 @@ std::int16_t hook_trigger_create_projectiles(
     if (outermost_local_fire) {
         g_local_fire_marker_correction_count = 0;
         g_local_projectile_direction_override_count = 0;
+        g_local_fire_tracking = {};
     }
 
     return result;
@@ -1840,8 +2884,10 @@ void hook_first_person_weapon_build(
         return;
     }
 
-    TrackingSnapshot tracking{};
-    {
+    auto tracking = capture_tracking_snapshot();
+    if (tracking.valid) {
+        publish_tracking_snapshot(tracking);
+    } else {
         const std::scoped_lock lock{g_tracking_mutex};
         tracking = g_tracking_snapshot;
     }
@@ -1999,6 +3045,7 @@ void hook_first_person_weapon_build(
         }
     }
 
+    record_visual_pose_diagnostics(tracking, live_palette);
     const auto total =
         g_visual_override_count.fetch_add(1, std::memory_order_relaxed) + 1;
     g_visual_weapon_attached.store(true, std::memory_order_release);
@@ -2479,6 +3526,9 @@ extern "C" __declspec(dllexport) bool HaloCEVR_GetStatus(
     if (g_locomotion_bridge_observed.load(std::memory_order_acquire)) {
         flags |= kStatusLocomotionBridgeObserved;
     }
+    if (g_two_hand_hold_latched.load(std::memory_order_acquire)) {
+        flags |= kStatusTwoHandHoldActive;
+    }
 
     const HaloCEVR_RuntimeStatus snapshot{
         .size = sizeof(HaloCEVR_RuntimeStatus),
@@ -2491,6 +3541,27 @@ extern "C" __declspec(dllexport) bool HaloCEVR_GetStatus(
         .attached_component =
             g_attached_component.load(std::memory_order_acquire)};
     *status = snapshot;
+    return true;
+}
+
+extern "C" __declspec(dllexport) bool HaloCEVR_GetPoseDiagnostics(
+    HaloCEVR_PoseDiagnostics* diagnostics) {
+    if (diagnostics == nullptr ||
+        diagnostics->size < sizeof(HaloCEVR_PoseDiagnostics)) {
+        return false;
+    }
+
+    const std::scoped_lock lock{g_pose_diagnostics_mutex};
+    auto snapshot = g_pose_diagnostics;
+    snapshot.size = sizeof(snapshot);
+    snapshot.version = 1;
+    snapshot.visual_override_count =
+        g_visual_override_count.load(std::memory_order_acquire);
+    snapshot.marker_override_count =
+        g_marker_override_count.load(std::memory_order_acquire);
+    snapshot.projectile_override_count =
+        g_override_count.load(std::memory_order_acquire);
+    *diagnostics = snapshot;
     return true;
 }
 
@@ -2510,16 +3581,37 @@ public:
         }
 
         m_armed = true;
+        std::array<wchar_t, 16> arm_ik_setting{};
+        auto arm_ik_setting_length = GetEnvironmentVariableW(
+            L"UEVR_HALO_ARM_IK",
+            arm_ik_setting.data(),
+            static_cast<DWORD>(arm_ik_setting.size()));
+        if (arm_ik_setting_length == 0) {
+            // Compatibility with packages made before the mode was renamed.
+            arm_ik_setting_length = GetEnvironmentVariableW(
+                L"UEVR_HALO_TWO_HAND_IK",
+                arm_ik_setting.data(),
+                static_cast<DWORD>(arm_ik_setting.size()));
+        }
+        if (arm_ik_setting_length > 0 &&
+            arm_ik_setting_length < arm_ik_setting.size()) {
+            const auto first = static_cast<wchar_t>(
+                std::towlower(arm_ik_setting.front()));
+            g_two_hand_ik_enabled.store(
+                first != L'0' && first != L'f' &&
+                first != L'n' && first != L'o',
+                std::memory_order_release);
+        }
         std::array<wchar_t, 16> two_hand_setting{};
         const auto two_hand_setting_length = GetEnvironmentVariableW(
-            L"UEVR_HALO_TWO_HAND_IK",
+            L"UEVR_HALO_TWO_HAND_HOLD",
             two_hand_setting.data(),
             static_cast<DWORD>(two_hand_setting.size()));
         if (two_hand_setting_length > 0 &&
             two_hand_setting_length < two_hand_setting.size()) {
             const auto first = static_cast<wchar_t>(
                 std::towlower(two_hand_setting.front()));
-            g_two_hand_ik_enabled.store(
+            g_two_hand_hold_enabled.store(
                 first != L'0' && first != L'f' &&
                 first != L'n' && first != L'o',
                 std::memory_order_release);
@@ -2529,6 +3621,7 @@ public:
             DeleteFileW(marker.c_str());
         }
         publish_gameplay_ready(false, true);
+        publish_reticle_hide(false, true);
         g_replacement_reticle_active.store(false, std::memory_order_release);
         API::UObjectHook::activate();
         // The native weapon/palette/projectile path below reads the raw
@@ -2542,9 +3635,12 @@ public:
         API::VR::set_mod_value("VR_DecoupledPitchUIAdjust", false);
         api->log_info(
             "HaloCEMotionControls: armed; visual weapon and native Blam "
-            "muzzle are owned by the right controller; two-hand IK=%d; "
+            "muzzle are owned by the right controller; arm mode=%s; "
             "game camera aim and pitch/UI compensation remain disabled",
-            g_two_hand_ik_enabled.load(std::memory_order_relaxed) ? 1 : 0);
+            g_two_hand_ik_enabled.load(std::memory_order_relaxed)
+                ? "anchored-arm IK (yaw-only shoulders, clavicle assist, "
+                  "exact wrists)"
+                : "floating hands (arms hidden)");
     }
 
     void on_pre_engine_tick(API::UGameEngine* engine, float delta) override {
@@ -2568,6 +3664,8 @@ public:
         }
 
         update_tracking_snapshot();
+        update_two_hand_hold(delta);
+        update_world_reticle_transform();
 
         if (!m_native_hook_attempted) {
             // Retry while the simulation DLL is still loading, but make a
@@ -2580,15 +3678,18 @@ public:
             }
         }
 
-        refresh_replacement_reticle_state();
-
         m_discovery_timer -= std::max(delta, 0.0f);
         if (m_discovery_timer > 0.0f) {
             return;
         }
         m_discovery_timer = 0.25f;
 
+        // Marker files are a compatibility bridge between the native plugin
+        // and the profile Lua script. Poll them at 4 Hz rather than opening a
+        // filesystem handle on every engine tick.
+        refresh_replacement_reticle_state();
         maintain_weapon_attachment();
+        maintain_world_reticle_widget();
     }
 
     void on_pre_viewport_client_draw(
@@ -2611,6 +3712,29 @@ public:
         if (!m_armed || retval == nullptr || state == nullptr ||
             !API::VR::is_runtime_ready() ||
             user_index != API::VR::get_lowest_xinput_index()) {
+            return;
+        }
+
+        // UEVR maps the left grip to LEFT_SHOULDER, which Halo binds to
+        // grenade throw. While the support hand is holding the two-handed
+        // grip, or is primed inside the barrel zone, swallow that button so
+        // acquiring or holding the weapon never throws a grenade.
+        if (g_two_hand_hold_enabled.load(std::memory_order_relaxed) &&
+            (g_two_hand_hold_latched.load(std::memory_order_relaxed) ||
+             g_two_hand_zone_active.load(std::memory_order_relaxed))) {
+            state->Gamepad.wButtons &=
+                static_cast<WORD>(~XINPUT_GAMEPAD_LEFT_SHOULDER);
+        }
+
+        constexpr WORD dpad_mask =
+            XINPUT_GAMEPAD_DPAD_UP |
+            XINPUT_GAMEPAD_DPAD_DOWN |
+            XINPUT_GAMEPAD_DPAD_LEFT |
+            XINPUT_GAMEPAD_DPAD_RIGHT;
+        if ((state->Gamepad.wButtons & dpad_mask) != 0) {
+            // UEVR's d-pad shifting deliberately converts a stick gesture
+            // into buttons and clears that stick before plugin callbacks run.
+            // Do not re-inject analog movement on top of the shifted buttons.
             return;
         }
 
@@ -2670,80 +3794,1051 @@ public:
 
 private:
     void update_tracking_snapshot() {
-        TrackingSnapshot snapshot{};
-        if (API::VR::is_runtime_ready() && API::VR::is_hmd_active()) {
-            const auto hmd_index = API::VR::get_hmd_index();
-            const auto right_index = API::VR::get_right_controller_index();
-            const auto left_index = API::VR::get_left_controller_index();
-            if (hmd_index < 0 || hmd_index >= 64 || right_index < 0 ||
-                right_index >= 64) {
-                const std::scoped_lock lock{g_tracking_mutex};
-                g_tracking_snapshot = snapshot;
-                g_tracking_valid.store(false, std::memory_order_release);
-                g_left_tracking_valid.store(
-                    false,
-                    std::memory_order_release);
-                return;
+        publish_tracking_snapshot(capture_tracking_snapshot());
+    }
+
+    static bool has_outer(
+        API::UObject* object,
+        API::UObject* expected_outer) {
+        for (auto* outer = object != nullptr ? object->get_outer() : nullptr;
+             outer != nullptr && outer != object;
+             outer = outer->get_outer()) {
+            if (outer == expected_outer) {
+                return true;
             }
+        }
+        return false;
+    }
 
-            const auto hmd = API::VR::get_pose(hmd_index);
-            const auto grip = API::VR::get_grip_pose(right_index);
-            const auto aim = API::VR::get_aim_pose(right_index);
+    API::UObject* find_reticle_object(
+        API::UClass* required_class,
+        std::wstring_view required_text,
+        API::UObject* required_outer = nullptr) {
+        auto* const objects = API::FUObjectArray::get();
+        if (objects == nullptr || required_class == nullptr) {
+            return nullptr;
+        }
+        for (auto index = objects->get_object_count() - 1;
+             index >= 0;
+             --index) {
+            auto* const object = objects->get_object(index);
+            if (object == nullptr || !object->is_a(required_class) ||
+                (required_outer != nullptr &&
+                 !has_outer(object, required_outer))) {
+                continue;
+            }
+            const auto name = object->get_full_name();
+            if (name.find(required_text) != std::wstring::npos) {
+                return object;
+            }
+        }
+        return nullptr;
+    }
 
-            snapshot.hmd_position = {
-                hmd.position.x,
-                hmd.position.y,
-                hmd.position.z};
-            snapshot.hmd_rotation = {
-                hmd.rotation.x,
-                hmd.rotation.y,
-                hmd.rotation.z,
-                hmd.rotation.w};
-            snapshot.right_grip_position = {
-                grip.position.x,
-                grip.position.y,
-                grip.position.z};
-            snapshot.right_grip_rotation = {
-                grip.rotation.x,
-                grip.rotation.y,
-                grip.rotation.z,
-                grip.rotation.w};
-            snapshot.right_aim_rotation = {
-                aim.rotation.x,
-                aim.rotation.y,
-                aim.rotation.z,
-                aim.rotation.w};
-            snapshot.valid =
-                finite(snapshot.hmd_position) &&
-                finite(snapshot.hmd_rotation) &&
-                finite(snapshot.right_grip_position) &&
-                finite(snapshot.right_grip_rotation) &&
-                finite(snapshot.right_aim_rotation);
+    API::UObject* find_screen_reticle_image(API::UClass* required_class) {
+        auto* const objects = API::FUObjectArray::get();
+        if (objects == nullptr || required_class == nullptr) {
+            return nullptr;
+        }
+        for (auto index = objects->get_object_count() - 1;
+             index >= 0;
+             --index) {
+            auto* const object = objects->get_object(index);
+            if (object == nullptr || !object->is_a(required_class)) {
+                continue;
+            }
+            const auto name = object->get_full_name();
+            if (name.find(L".WBP_HUD_Main_C_") != std::wstring::npos &&
+                name.find(L".FirstPersonReticle.WidgetTree_") !=
+                    std::wstring::npos &&
+                name.ends_with(L".Reticle_Image")) {
+                return object;
+            }
+        }
+        return nullptr;
+    }
 
-            if (left_index >= 0 && left_index < 64) {
-                const auto left_grip =
-                    API::VR::get_grip_pose(left_index);
-                snapshot.left_grip_position = {
-                    left_grip.position.x,
-                    left_grip.position.y,
-                    left_grip.position.z};
-                snapshot.left_grip_rotation = {
-                    left_grip.rotation.x,
-                    left_grip.rotation.y,
-                    left_grip.rotation.z,
-                    left_grip.rotation.w};
-                snapshot.left_valid =
-                    finite(snapshot.left_grip_position) &&
-                    finite(snapshot.left_grip_rotation);
+    API::UObject* get_dynamic_material(API::UObject* image) {
+        if (image == nullptr) {
+            return nullptr;
+        }
+        auto* const function =
+            image->get_class()->find_function(L"GetDynamicMaterial");
+        if (function == nullptr) {
+            return nullptr;
+        }
+        alignas(16) std::array<std::byte, 64> parameters{};
+        image->process_event(function, parameters.data());
+        return read_function_parameter<API::UObject*>(
+            function,
+            parameters,
+            L"ReturnValue");
+    }
+
+    API::UObject* call_object_return(
+        API::UObject* object,
+        std::wstring_view function_name) {
+        if (object == nullptr) {
+            return nullptr;
+        }
+        auto* const function =
+            object->get_class()->find_function(function_name);
+        if (function == nullptr) {
+            return nullptr;
+        }
+        alignas(16) std::array<std::byte, 64> parameters{};
+        object->process_event(function, parameters.data());
+        return read_function_parameter<API::UObject*>(
+            function,
+            parameters,
+            L"ReturnValue");
+    }
+
+    bool bind_world_reticle_render_target() {
+        auto* const render_target = call_object_return(
+            m_world_reticle_component,
+            L"GetRenderTarget");
+        auto* const material_instance = call_object_return(
+            m_world_reticle_component,
+            L"GetMaterialInstance");
+        if (render_target == nullptr || material_instance == nullptr) {
+            return false;
+        }
+
+        static const API::FName slate_ui{L"SlateUI"};
+        auto* current_texture = static_cast<API::UObject*>(nullptr);
+        auto* get_texture =
+            material_instance->get_class()->find_function(
+                L"K2_GetTextureParameterValue");
+        if (get_texture != nullptr) {
+            alignas(16) std::array<std::byte, 64> get_parameters{};
+            if (write_function_parameter(
+                    get_texture,
+                    get_parameters,
+                    L"ParameterName",
+                    slate_ui)) {
+                material_instance->process_event(
+                    get_texture,
+                    get_parameters.data());
+                current_texture =
+                    read_function_parameter<API::UObject*>(
+                        get_texture,
+                        get_parameters,
+                        L"ReturnValue");
             }
         }
 
-        const std::scoped_lock lock{g_tracking_mutex};
-        g_tracking_snapshot = snapshot;
-        g_tracking_valid.store(snapshot.valid, std::memory_order_release);
-        g_left_tracking_valid.store(
-            snapshot.left_valid,
-            std::memory_order_release);
+        const bool binding_changed =
+            material_instance != m_world_reticle_pass_material ||
+            render_target != m_world_reticle_render_target ||
+            current_texture != render_target;
+        if (!binding_changed) {
+            return true;
+        }
+
+        auto* const set_texture =
+            material_instance->get_class()->find_function(
+                L"SetTextureParameterValue");
+        alignas(16) std::array<std::byte, 64> set_parameters{};
+        if (set_texture == nullptr ||
+            !write_function_parameter(
+                set_texture,
+                set_parameters,
+                L"ParameterName",
+                slate_ui) ||
+            !write_function_parameter(
+                set_texture,
+                set_parameters,
+                L"Value",
+                render_target)) {
+            return false;
+        }
+        material_instance->process_event(
+            set_texture,
+            set_parameters.data());
+
+        if (get_texture != nullptr) {
+            alignas(16) std::array<std::byte, 64> verify_parameters{};
+            if (!write_function_parameter(
+                    get_texture,
+                    verify_parameters,
+                    L"ParameterName",
+                    slate_ui)) {
+                return false;
+            }
+            material_instance->process_event(
+                get_texture,
+                verify_parameters.data());
+            if (read_function_parameter<API::UObject*>(
+                    get_texture,
+                    verify_parameters,
+                    L"ReturnValue") != render_target) {
+                return false;
+            }
+        }
+
+        m_world_reticle_pass_material = material_instance;
+        m_world_reticle_render_target = render_target;
+        API::get()->log_info(
+            "HaloCEMotionControls: rebound Widget3D SlateUI to the current "
+            "reticle render target");
+        return true;
+    }
+
+    void restore_world_reticle_depth_test() {
+        if (m_world_reticle_base_material == nullptr ||
+            !m_world_reticle_depth_override_active) {
+            return;
+        }
+        m_world_reticle_base_material->set_bool_property(
+            L"bDisableDepthTest",
+            m_world_reticle_depth_test_was_disabled);
+        m_world_reticle_base_material = nullptr;
+        m_world_reticle_depth_override_active = false;
+    }
+
+    bool disable_world_reticle_depth_test() {
+        if (m_world_reticle_pass_material == nullptr) {
+            return false;
+        }
+
+        // UWidgetComponent's pass material is a dynamic instance whose Parent
+        // chain ends at /Engine/EngineMaterials/Widget3DPassThrough.  A fixed
+        // ten-metre reticle otherwise disappears whenever nearer world
+        // geometry crosses the controller ray (most visibly while aiming at
+        // the ground).  Disable depth on that pass only while our component is
+        // active, and restore the material's original value on teardown.
+        auto* material = m_world_reticle_pass_material;
+        for (int depth = 0; material != nullptr && depth < 4; ++depth) {
+            auto* const disable_depth_property =
+                material->get_class()->find_property(L"bDisableDepthTest");
+            if (disable_depth_property != nullptr) {
+                if (material != m_world_reticle_base_material) {
+                    restore_world_reticle_depth_test();
+                    m_world_reticle_base_material = material;
+                    m_world_reticle_depth_test_was_disabled =
+                        material->get_bool_property(L"bDisableDepthTest");
+                    m_world_reticle_depth_override_active = true;
+                }
+                if (!material->get_bool_property(L"bDisableDepthTest")) {
+                    material->set_bool_property(L"bDisableDepthTest", true);
+                }
+                return material->get_bool_property(L"bDisableDepthTest");
+            }
+
+            auto* const parent =
+                material->get_property_data<API::UObject*>(L"Parent");
+            material = parent == nullptr ? nullptr : *parent;
+        }
+        return false;
+    }
+
+    bool set_widget(API::UObject* component, API::UObject* widget) {
+        if (component == nullptr) {
+            return false;
+        }
+        auto* const function =
+            component->get_class()->find_function(L"SetWidget");
+        std::array<std::byte, 64> parameters{};
+        if (function == nullptr ||
+            (!write_function_parameter(
+                 function, parameters, L"Widget", widget) &&
+             !write_function_parameter(
+                 function, parameters, L"InWidget", widget))) {
+            return false;
+        }
+        component->process_event(function, parameters.data());
+        auto* const property =
+            component->get_property_data<API::UObject*>(L"Widget");
+        return property != nullptr && *property == widget;
+    }
+
+    bool set_uobject_rooted(API::UObject* object, bool rooted) {
+        if (object == nullptr) {
+            return false;
+        }
+        auto* const objects = API::FUObjectArray::get();
+        if (objects == nullptr) {
+            return false;
+        }
+
+        // UE5's EInternalObjectFlags layout is stable for these GC flags.
+        // WidgetComponent's raw Widget property did not keep a dynamically
+        // created UserWidget reachable in this game, so explicitly mirror
+        // UObject::AddToRoot/RemoveFromRoot on its FUObjectItem.
+        constexpr std::int32_t root_set = 0x40000000;
+        constexpr std::int32_t invalid_gc_state =
+            0x10000000 |  // Unreachable
+            0x20000000 |  // PendingKill
+            static_cast<std::int32_t>(0x80000000u);  // Garbage
+        for (auto index = objects->get_object_count() - 1;
+             index >= 0;
+             --index) {
+            auto* const item = objects->get_item(index);
+            if (item == nullptr || item->object != object) {
+                continue;
+            }
+            if (rooted) {
+                if ((item->flags & invalid_gc_state) != 0) {
+                    return false;
+                }
+                item->flags |= root_set;
+            } else {
+                item->flags &= ~root_set;
+            }
+            return true;
+        }
+        return false;
+    }
+
+    API::UObject* get_brush_resource_object(API::UObject* image) {
+        if (image == nullptr) {
+            return nullptr;
+        }
+        auto* const brush_property =
+            image->get_class()->find_property(L"Brush");
+        if (brush_property == nullptr || brush_property->get_offset() < 0) {
+            return nullptr;
+        }
+        auto* const struct_property =
+            reinterpret_cast<API::FStructProperty*>(brush_property);
+        auto* const brush_struct = struct_property->get_struct();
+        auto* const resource_property =
+            brush_struct != nullptr
+                ? brush_struct->find_property(L"ResourceObject")
+                : nullptr;
+        if (resource_property == nullptr ||
+            resource_property->get_offset() < 0) {
+            return nullptr;
+        }
+        auto* const address =
+            reinterpret_cast<std::byte*>(image) +
+            brush_property->get_offset() +
+            resource_property->get_offset();
+        return *reinterpret_cast<API::UObject**>(address);
+    }
+
+    bool set_reticle_image_material(
+        API::UObject* image,
+        API::UObject* material) {
+        if (image == nullptr || material == nullptr) {
+            return false;
+        }
+        auto* const function =
+            image->get_class()->find_function(L"SetBrushResourceObject");
+        std::array<std::byte, 64> parameters{};
+        if (function == nullptr ||
+            !write_function_parameter(
+                function, parameters, L"ResourceObject", material)) {
+            return false;
+        }
+        image->process_event(function, parameters.data());
+        return get_brush_resource_object(image) == material;
+    }
+
+    void set_reticle_image_opacity(API::UObject* image, float opacity) {
+        if (image == nullptr) {
+            return;
+        }
+        auto* const function =
+            image->get_class()->find_function(L"SetRenderOpacity");
+        std::array<std::byte, 64> parameters{};
+        if (function == nullptr ||
+            !write_function_parameter(
+                function, parameters, L"InOpacity", opacity)) {
+            return;
+        }
+        image->process_event(function, parameters.data());
+    }
+
+    bool set_world_reticle_draw_size(std::int32_t width, std::int32_t height) {
+        if (m_world_reticle_component == nullptr) {
+            return false;
+        }
+        auto* const function =
+            m_world_reticle_component->get_class()->find_function(
+                L"SetDrawSize");
+        std::array<std::byte, 64> parameters{};
+        // UWidgetComponent stores DrawSize as FIntPoint, but its reflected
+        // Blueprint setter deliberately takes FVector2D. UE5's LWC
+        // FVector2D is two doubles; writing an 8-byte FIntPoint into this
+        // 16-byte parameter produced (0,0), left RenderTarget null, and kept
+        // bRedrawRequested latched so the widget retried a failed draw every
+        // tick.
+        const UnrealVector2D size{
+            static_cast<double>(width),
+            static_cast<double>(height)};
+        if (function == nullptr ||
+            !write_function_parameter(
+                function, parameters, L"Size", size)) {
+            return false;
+        }
+        m_world_reticle_component->process_event(
+            function,
+            parameters.data());
+        auto* const actual =
+            m_world_reticle_component
+                ->get_property_data<UnrealIntPoint>(L"DrawSize");
+        return actual != nullptr &&
+            actual->x == width &&
+            actual->y == height;
+    }
+
+    bool set_world_reticle_scale(double scale) {
+        if (m_world_reticle_component == nullptr) {
+            return false;
+        }
+        auto* const function =
+            m_world_reticle_component->get_class()->find_function(
+                L"SetRelativeScale3D");
+        alignas(16) std::array<std::byte, 64> parameters{};
+        const UnrealVector new_scale{scale, scale, scale};
+        if (function == nullptr ||
+            !write_function_parameter(
+                function,
+                parameters,
+                L"NewScale3D",
+                new_scale)) {
+            return false;
+        }
+        m_world_reticle_component->process_event(
+            function,
+            parameters.data());
+        auto* const actual =
+            m_world_reticle_component
+                ->get_property_data<UnrealVector>(L"RelativeScale3D");
+        return actual != nullptr &&
+            std::abs(actual->x - scale) < 0.001 &&
+            std::abs(actual->y - scale) < 0.001 &&
+            std::abs(actual->z - scale) < 0.001;
+    }
+
+    bool set_world_reticle_tint(float gain) {
+        if (m_world_reticle_component == nullptr) {
+            return false;
+        }
+        auto* const function =
+            m_world_reticle_component->get_class()->find_function(
+                L"SetTintColorAndOpacity");
+        alignas(16) std::array<std::byte, 64> parameters{};
+        const UnrealLinearColor tint{gain, gain, gain, 1.0f};
+        if (function == nullptr ||
+            !write_function_parameter(
+                function,
+                parameters,
+                L"NewTintColorAndOpacity",
+                tint)) {
+            return false;
+        }
+        m_world_reticle_component->process_event(
+            function,
+            parameters.data());
+        auto* const actual =
+            m_world_reticle_component
+                ->get_property_data<UnrealLinearColor>(
+                    L"TintColorAndOpacity");
+        return actual != nullptr &&
+            std::abs(actual->r - gain) < 0.001f &&
+            std::abs(actual->g - gain) < 0.001f &&
+            std::abs(actual->b - gain) < 0.001f &&
+            std::abs(actual->a - 1.0f) < 0.001f;
+    }
+
+    bool prune_world_reticle_overlay() {
+        if (m_world_reticle_widget == nullptr ||
+            m_world_reticle_image == nullptr) {
+            return false;
+        }
+        auto& api = API::get();
+        auto* const overlay_class =
+            api->find_uobject<API::UClass>(
+                L"Class /Script/UMG.Overlay");
+        auto* const overlay = find_reticle_object(
+            overlay_class,
+            L".ReticleOverlay",
+            m_world_reticle_widget);
+        if (overlay == nullptr) {
+            return false;
+        }
+
+        auto* const count_function =
+            overlay->get_class()->find_function(L"GetChildrenCount");
+        auto* const child_function =
+            overlay->get_class()->find_function(L"GetChildAt");
+        auto* const remove_function =
+            overlay->get_class()->find_function(L"RemoveChildAt");
+        if (count_function == nullptr || child_function == nullptr ||
+            remove_function == nullptr) {
+            return false;
+        }
+
+        std::array<std::byte, 64> count_parameters{};
+        overlay->process_event(count_function, count_parameters.data());
+        const auto count = read_function_parameter<std::int32_t>(
+            count_function,
+            count_parameters,
+            L"ReturnValue");
+        for (auto index = count - 1; index >= 0; --index) {
+            std::array<std::byte, 64> child_parameters{};
+            if (!write_function_parameter(
+                    child_function,
+                    child_parameters,
+                    L"Index",
+                    index)) {
+                return false;
+            }
+            overlay->process_event(
+                child_function,
+                child_parameters.data());
+            auto* const child =
+                read_function_parameter<API::UObject*>(
+                    child_function,
+                    child_parameters,
+                    L"ReturnValue");
+            if (child == m_world_reticle_image) {
+                continue;
+            }
+            std::array<std::byte, 64> remove_parameters{};
+            if (!write_function_parameter(
+                    remove_function,
+                    remove_parameters,
+                    L"Index",
+                    index)) {
+                return false;
+            }
+            overlay->process_event(
+                remove_function,
+                remove_parameters.data());
+        }
+
+        std::array<std::byte, 64> final_count_parameters{};
+        overlay->process_event(
+            count_function,
+            final_count_parameters.data());
+        return read_function_parameter<std::int32_t>(
+                   count_function,
+                   final_count_parameters,
+                   L"ReturnValue") == 1;
+    }
+
+    API::UObject* create_reticle_widget(API::UObject* player_controller) {
+        auto& api = API::get();
+        auto* const library_class =
+            api->find_uobject<API::UClass>(
+                L"Class /Script/UMG.WidgetBlueprintLibrary");
+        auto* const widget_class =
+            api->find_uobject<API::UClass>(
+                L"WidgetBlueprintGeneratedClass "
+                L"/Game/UI/Hud/Reticle/WBP_FirstPersonReticle."
+                L"WBP_FirstPersonReticle_C");
+        if (library_class == nullptr || widget_class == nullptr ||
+            player_controller == nullptr) {
+            return nullptr;
+        }
+        auto* const library = library_class->get_class_default_object();
+        auto* const function = library_class->find_function(L"Create");
+        std::array<std::byte, 128> parameters{};
+        if (library == nullptr || function == nullptr ||
+            !write_function_parameter(
+                function,
+                parameters,
+                L"WorldContextObject",
+                player_controller) ||
+            !write_function_parameter(
+                function, parameters, L"WidgetType", widget_class) ||
+            !write_function_parameter(
+                function,
+                parameters,
+                L"OwningPlayer",
+                player_controller)) {
+            return nullptr;
+        }
+        library->process_event(function, parameters.data());
+        return read_function_parameter<API::UObject*>(
+            function,
+            parameters,
+            L"ReturnValue");
+    }
+
+    void reset_world_reticle_cache(API::UObject* owner) {
+        restore_world_reticle_depth_test();
+        if (m_world_reticle_widget_rooted) {
+            set_uobject_rooted(m_world_reticle_widget, false);
+        }
+        m_reticle_owner = owner;
+        m_world_reticle_component = nullptr;
+        m_world_reticle_widget = nullptr;
+        m_world_reticle_widget_rooted = false;
+        m_world_reticle_image = nullptr;
+        m_world_reticle_pruned = false;
+        m_world_reticle_pass_material = nullptr;
+        m_world_reticle_render_target = nullptr;
+        m_screen_reticle_image = nullptr;
+        m_screen_reticle_suppressed = false;
+        m_shared_reticle_material = nullptr;
+    }
+
+    void log_reticle_state(int state, const char* message) {
+        if (state == m_reticle_state) {
+            return;
+        }
+        m_reticle_state = state;
+        if (state == 0) {
+            API::get()->log_info("%s", message);
+        } else {
+            API::get()->log_warn("%s", message);
+        }
+    }
+
+    void maintain_world_reticle_widget() {
+        auto& api = API::get();
+        auto* const owner = api->get_local_pawn(0);
+        auto* const player_controller = api->get_player_controller(0);
+        if (owner == nullptr || player_controller == nullptr) {
+            reset_world_reticle_cache(nullptr);
+            return;
+        }
+        if (owner != m_reticle_owner) {
+            reset_world_reticle_cache(owner);
+        }
+
+        auto* const widget_component_class =
+            api->find_uobject<API::UClass>(
+                L"Class /Script/UMG.WidgetComponent");
+        if (m_world_reticle_component == nullptr) {
+            m_world_reticle_component = find_reticle_object(
+                widget_component_class,
+                L"WidgetComponent_",
+                owner);
+        }
+        if (m_world_reticle_component == nullptr) {
+            log_reticle_state(
+                1,
+                "HaloCEMotionControls: waiting for Lua WidgetComponent");
+            return;
+        }
+
+        auto* const widget_property =
+            m_world_reticle_component
+                ->get_property_data<API::UObject*>(L"Widget");
+        auto* hosted_widget =
+            widget_property != nullptr ? *widget_property : nullptr;
+        if (hosted_widget != nullptr &&
+            hosted_widget != m_world_reticle_widget &&
+            !set_uobject_rooted(hosted_widget, true)) {
+            // A non-null Widget pointer can remain after the object has entered
+            // GC. Clear it through the component API so a fresh instance can be
+            // created instead of dereferencing the stale UObject.
+            set_widget(m_world_reticle_component, nullptr);
+            hosted_widget = nullptr;
+        }
+        if (hosted_widget == nullptr) {
+            hosted_widget = create_reticle_widget(player_controller);
+            if (hosted_widget == nullptr) {
+                log_reticle_state(
+                    2,
+                    "HaloCEMotionControls: WidgetBlueprintLibrary.Create "
+                    "returned null");
+                return;
+            }
+            if (!set_uobject_rooted(hosted_widget, true)) {
+                log_reticle_state(
+                    7,
+                    "HaloCEMotionControls: failed to root created world "
+                    "reticle widget");
+                return;
+            }
+            if (!set_widget(m_world_reticle_component, hosted_widget)) {
+                set_uobject_rooted(hosted_widget, false);
+                log_reticle_state(
+                    3,
+                    "HaloCEMotionControls: WidgetComponent.SetWidget did "
+                    "not retain the created reticle");
+                return;
+            }
+            api->log_info(
+                "HaloCEMotionControls: native world reticle widget retained");
+        }
+        if (hosted_widget != m_world_reticle_widget) {
+            if (m_world_reticle_widget_rooted) {
+                set_uobject_rooted(m_world_reticle_widget, false);
+            }
+            m_world_reticle_widget = hosted_widget;
+            m_world_reticle_widget_rooted = true;
+            m_world_reticle_image = nullptr;
+            m_world_reticle_pruned = false;
+        }
+
+        auto* const lazy_image_class =
+            api->find_uobject<API::UClass>(
+                L"Class /Script/HaloUI.HaloUILazyImage");
+        if (m_screen_reticle_image == nullptr) {
+            m_screen_reticle_image =
+                find_screen_reticle_image(lazy_image_class);
+        }
+        if (m_world_reticle_image == nullptr) {
+            m_world_reticle_image = find_reticle_object(
+                lazy_image_class,
+                L".Reticle_Image",
+                m_world_reticle_widget);
+        }
+        if (m_screen_reticle_image == nullptr ||
+            m_world_reticle_image == nullptr) {
+            log_reticle_state(
+                m_screen_reticle_image == nullptr ? 4 : 5,
+                m_screen_reticle_image == nullptr
+                    ? "HaloCEMotionControls: waiting for live HUD "
+                      "Reticle_Image"
+                    : "HaloCEMotionControls: waiting for world "
+                      "Reticle_Image");
+            return;
+        }
+        if (!m_world_reticle_pruned) {
+            if (!prune_world_reticle_overlay()) {
+                log_reticle_state(
+                    8,
+                    "HaloCEMotionControls: failed to isolate the authored "
+                    "250x250 Reticle_Image");
+                return;
+            }
+            m_world_reticle_pruned = true;
+            api->log_info(
+                "HaloCEMotionControls: world reticle reduced to the authored "
+                "250x250 image");
+        }
+        auto* const draw_size =
+            m_world_reticle_component
+                ->get_property_data<UnrealIntPoint>(L"DrawSize");
+        if (draw_size == nullptr ||
+            draw_size->x != 250 || draw_size->y != 250) {
+            if (!set_world_reticle_draw_size(250, 250)) {
+                log_reticle_state(
+                    10,
+                    "HaloCEMotionControls: failed to enforce the authored "
+                    "250x250 reticle target");
+                return;
+            }
+        }
+        auto* const relative_scale =
+            m_world_reticle_component
+                ->get_property_data<UnrealVector>(L"RelativeScale3D");
+        if (relative_scale == nullptr ||
+            std::abs(relative_scale->x - kWorldReticleScale) > 0.001 ||
+            std::abs(relative_scale->y - kWorldReticleScale) > 0.001 ||
+            std::abs(relative_scale->z - kWorldReticleScale) > 0.001) {
+            if (!set_world_reticle_scale(kWorldReticleScale)) {
+                log_reticle_state(
+                    12,
+                    "HaloCEMotionControls: failed to enforce world "
+                    "reticle scale");
+                return;
+            }
+        }
+        auto* const tint =
+            m_world_reticle_component
+                ->get_property_data<UnrealLinearColor>(
+                    L"TintColorAndOpacity");
+        if (tint == nullptr ||
+            std::abs(tint->r - kWorldReticleEmissiveGain) > 0.001f ||
+            std::abs(tint->g - kWorldReticleEmissiveGain) > 0.001f ||
+            std::abs(tint->b - kWorldReticleEmissiveGain) > 0.001f ||
+            std::abs(tint->a - 1.0f) > 0.001f) {
+            if (!set_world_reticle_tint(kWorldReticleEmissiveGain)) {
+                log_reticle_state(
+                    13,
+                    "HaloCEMotionControls: failed to enforce world "
+                    "reticle emissive gain");
+                return;
+            }
+        }
+        // SetDrawSize may allocate a replacement render target after the
+        // Widget3D MID has already been created. UWidgetComponent normally
+        // refreshes the SlateUI texture parameter as part of its internal
+        // material update, but Halo's dynamically added component can retain
+        // the old (or null) texture. The render target then contains the
+        // correct cyan ring while the world quad samples black. Verify and
+        // repair the binding against the component's current objects.
+        if (!bind_world_reticle_render_target()) {
+            log_reticle_state(
+                11,
+                "HaloCEMotionControls: failed to bind Widget3D SlateUI "
+                "render target");
+            return;
+        }
+        if (!disable_world_reticle_depth_test()) {
+            log_reticle_state(
+                14,
+                "HaloCEMotionControls: failed to disable world reticle "
+                "depth testing");
+            return;
+        }
+
+        // Copy the live weapon-specific reticle MID (for example the sniper
+        // ring) into the component-owned image. This changes the pixels drawn
+        // into the WidgetComponent render target; it is separate from the
+        // Widget3D SlateUI pass material rebound above.
+        auto* const source_material =
+            get_dynamic_material(m_screen_reticle_image);
+        if (source_material == nullptr) {
+            log_reticle_state(
+                6,
+                "HaloCEMotionControls: live HUD reticle MID unavailable");
+            return;
+        }
+        const bool material_changed =
+            m_shared_reticle_material != source_material ||
+            get_brush_resource_object(m_world_reticle_image) !=
+                source_material;
+        if (material_changed &&
+            !set_reticle_image_material(
+                m_world_reticle_image,
+                source_material)) {
+            log_reticle_state(
+                9,
+                "HaloCEMotionControls: world Reticle_Image brush did not "
+                "retain the live HUD MID");
+            return;
+        }
+        if (!m_screen_reticle_suppressed) {
+            set_reticle_image_opacity(m_screen_reticle_image, 0.0f);
+            m_screen_reticle_suppressed = true;
+        }
+        m_shared_reticle_material = source_material;
+        log_reticle_state(
+            0,
+            "HaloCEMotionControls: weapon-specific world reticle retained");
+
+        // Redraw only after a real brush transition. Requesting a redraw on
+        // every maintenance pass causes runaway Slate/D3D resource churn.
+        if (material_changed) {
+            auto* const redraw =
+                m_world_reticle_component->get_class()->find_function(
+                    L"RequestRedraw");
+            if (redraw == nullptr) {
+                return;
+            }
+            std::array<std::byte, 8> parameters{};
+            m_world_reticle_component->process_event(
+                redraw,
+                parameters.data());
+        }
+    }
+
+    void update_world_reticle_transform() {
+        if (m_world_reticle_component == nullptr ||
+            m_world_reticle_widget == nullptr) {
+            return;
+        }
+
+        TrackingSnapshot tracking{};
+        {
+            const std::scoped_lock lock{g_tracking_mutex};
+            tracking = g_tracking_snapshot;
+        }
+        if (!tracking.valid) {
+            return;
+        }
+
+        auto* const player_controller =
+            API::get()->get_player_controller(0);
+        if (player_controller == nullptr) {
+            return;
+        }
+        auto* const function =
+            player_controller->get_class()->find_function(
+                L"GetPlayerViewPoint");
+        std::array<std::byte, 128> viewpoint_parameters{};
+        if (function == nullptr) {
+            return;
+        }
+        player_controller->process_event(
+            function,
+            viewpoint_parameters.data());
+        const auto view_location =
+            read_function_parameter<UnrealVector>(
+                function,
+                viewpoint_parameters,
+                L"Location");
+        const auto view_rotation =
+            read_function_parameter<UnrealRotator>(
+                function,
+                viewpoint_parameters,
+                L"Rotation");
+
+        const auto hmd_rotation = normalized(tracking.hmd_rotation);
+        const auto aim_rotation = normalized(tracking.right_aim_rotation);
+        const auto aim_relative =
+            normalized(conjugate(hmd_rotation) * aim_rotation);
+        const auto controller_basis = effective_controller_basis(
+            tracking,
+            conjugate(hmd_rotation),
+            aim_relative);
+        if (!valid_basis(controller_basis)) {
+            return;
+        }
+
+        // Blam basis is +X forward, +Y left, +Z up. Unreal camera-local is
+        // +X forward, +Y right, +Z up.
+        const Vec3 local_direction{
+            controller_basis.forward.x,
+            -controller_basis.forward.y,
+            controller_basis.forward.z};
+
+        constexpr double radians_per_degree =
+            3.14159265358979323846 / 180.0;
+        const auto pitch = view_rotation.pitch * radians_per_degree;
+        const auto yaw = view_rotation.yaw * radians_per_degree;
+        const auto roll = view_rotation.roll * radians_per_degree;
+        const auto cp = std::cos(pitch);
+        const auto sp = std::sin(pitch);
+        const auto cy = std::cos(yaw);
+        const auto sy = std::sin(yaw);
+        const auto cr = std::cos(roll);
+        const auto sr = std::sin(roll);
+        const UnrealVector camera_forward{cp * cy, cp * sy, sp};
+        const UnrealVector camera_right{
+            sr * sp * cy - cr * sy,
+            sr * sp * sy + cr * cy,
+            -sr * cp};
+        const UnrealVector camera_up{
+            -(cr * sp * cy + sr * sy),
+            cy * sr - cr * sp * sy,
+            cr * cp};
+        const UnrealVector direction{
+            camera_forward.x * local_direction.x +
+                camera_right.x * local_direction.y +
+                camera_up.x * local_direction.z,
+            camera_forward.y * local_direction.x +
+                camera_right.y * local_direction.y +
+                camera_up.y * local_direction.z,
+            camera_forward.z * local_direction.x +
+                camera_right.z * local_direction.y +
+                camera_up.z * local_direction.z};
+        constexpr double reticle_distance_centimeters = 1000.0;
+        const UnrealVector target{
+            view_location.x + direction.x * reticle_distance_centimeters,
+            view_location.y + direction.y * reticle_distance_centimeters,
+            view_location.z + direction.z * reticle_distance_centimeters};
+        constexpr double degrees_per_radian =
+            180.0 / 3.14159265358979323846;
+        // The one-sided Widget3D pass uses local +X as the authored visible
+        // face. Point +X from the target back toward the camera. Creating the
+        // component as one-sided is essential: changing bIsTwoSided after its
+        // MID exists leaves the old two-sided parent and its black BackColor
+        // branch in place.
+        const UnrealRotator face_camera{
+            std::atan2(
+                -direction.z,
+                std::hypot(direction.x, direction.y)) *
+                degrees_per_radian,
+            std::atan2(-direction.y, -direction.x) *
+                degrees_per_radian,
+            0.0};
+
+        auto* const set_transform =
+            m_world_reticle_component->get_class()->find_function(
+                L"K2_SetWorldLocationAndRotation");
+        std::array<std::byte, 512> transform_parameters{};
+        if (set_transform == nullptr ||
+            !write_function_parameter(
+                set_transform,
+                transform_parameters,
+                L"NewLocation",
+                target) ||
+            !write_function_parameter(
+                set_transform,
+                transform_parameters,
+                L"NewRotation",
+                face_camera)) {
+            return;
+        }
+        m_world_reticle_component->process_event(
+            set_transform,
+            transform_parameters.data());
+    }
+
+    // Two-hand latch and blend, decided once per engine tick from the
+    // published snapshot (Halo-MCC-VR decides its latch once per frame for
+    // the same reason: edge detection cannot live in a multi-call getter).
+    void update_two_hand_hold(float delta) {
+        TrackingSnapshot tracking{};
+        {
+            const std::scoped_lock lock{g_tracking_mutex};
+            tracking = g_tracking_snapshot;
+        }
+
+        bool latched = false;
+        bool in_zone = false;
+        if (g_two_hand_hold_enabled.load(std::memory_order_relaxed) &&
+            g_gameplay_ready_published.load(std::memory_order_acquire) == 1 &&
+            !g_game_paused.load(std::memory_order_acquire) &&
+            tracking.valid && tracking.left_valid) {
+            const auto aim_forward = rotate(
+                normalized(tracking.right_aim_rotation),
+                Vec3{0.0f, 0.0f, -1.0f});
+            const auto hand_line =
+                tracking.left_grip_position -
+                tracking.right_grip_position;
+            const auto along = dot(hand_line, aim_forward);
+            const auto perpendicular = hand_line - aim_forward * along;
+            const auto lateral = std::sqrt(length_squared(perpendicular));
+            in_zone =
+                std::isfinite(along) && std::isfinite(lateral) &&
+                along > kTwoHandZoneMinAlongMeters &&
+                along < kTwoHandZoneMaxAlongMeters &&
+                lateral < kTwoHandZoneRadiusMeters;
+
+            // Retry the lookup until the runtime has created its action set;
+            // caching a permanent null here would silently kill the feature.
+            static UEVR_ActionHandle grip_action = nullptr;
+            if (grip_action == nullptr) {
+                grip_action = API::VR::get_action_handle(
+                    "/actions/default/in/Grip");
+            }
+            const auto grip_held =
+                grip_action != nullptr &&
+                API::VR::is_action_active(
+                    grip_action,
+                    API::VR::get_left_joystick_source());
+
+            const auto was_latched = g_two_hand_hold_latched.load(
+                std::memory_order_relaxed);
+            latched = grip_held && (was_latched || in_zone);
+        }
+        g_two_hand_zone_active.store(in_zone, std::memory_order_relaxed);
+
+        const auto previous = g_two_hand_hold_latched.exchange(
+            latched,
+            std::memory_order_acq_rel);
+        if (previous != latched) {
+            // Acquisition buzz on the support hand. The C ABI takes
+            // (seconds_from_now, duration, frequency, amplitude); the C++
+            // wrapper's parameter names disagree with that order, so these
+            // values are ordered for the ABI, not the wrapper names.
+            API::VR::trigger_haptic_vibration(
+                0.0f,
+                latched ? 0.12f : 0.06f,
+                0.0f,
+                latched ? 0.7f : 0.35f,
+                API::VR::get_left_joystick_source());
+        }
+
+        // The floating ball is misleading both while two-handed (shots
+        // follow the hand-to-hand line) and while zoomed (shots keep stock
+        // screen-center aim). The publisher only writes on transitions.
+        publish_reticle_hide(
+            latched || g_local_zoomed.load(std::memory_order_acquire));
+
+        auto blend = g_two_hand_hold_blend.load(std::memory_order_relaxed);
+        const auto target = latched ? 1.0f : 0.0f;
+        const auto step =
+            std::clamp(delta, 0.0f, 0.25f) / kTwoHandBlendSeconds;
+        if (blend < target) {
+            blend = std::min(target, blend + step);
+        } else {
+            blend = std::max(target, blend - step);
+        }
+        g_two_hand_hold_blend.store(blend, std::memory_order_relaxed);
     }
 
     void maintain_weapon_attachment() {
@@ -2791,7 +4886,9 @@ private:
         // guaranteed to be in UObjectHook's exact-class cache. It is already
         // the engine's authoritative local-pawn pointer, so inspect it
         // directly.
-        inspect_pawn(api->get_local_pawn(0));
+        auto* const local_pawn = api->get_local_pawn(0);
+        inspect_pawn(local_pawn);
+        update_game_paused(local_pawn);
 
         if (first_person_weapon == nullptr) {
             g_local_weapon_index.store(
@@ -2817,12 +4914,45 @@ private:
             std::memory_order_acq_rel);
         publish_gameplay_ready(
             weapon_index != kInvalidBlamObjectIndex);
+        if (weapon_index != previous_index) {
+            // Each weapon's stock left-hand pose differs, so the latched
+            // controller-to-wrist convention must be resampled from the new
+            // weapon's first tracked frame.
+            g_left_wrist_stock_latched.store(
+                false, std::memory_order_release);
+        }
         if (weapon_index != kInvalidBlamObjectIndex &&
             weapon_index != previous_index) {
             api->log_info(
                 "HaloCEMotionControls: local Blam weapon index is 0x%08x",
                 static_cast<std::uint32_t>(weapon_index));
         }
+    }
+
+    // Two-handing (and its LEFT_SHOULDER masking) is gameplay-only: a grip
+    // with the hands coincidentally aligned must not buzz or eat menu input
+    // while Halo is paused. Fail open to "not paused" when the statics
+    // class, function, or world context is unavailable.
+    void update_game_paused(API::UObject* world_context) {
+        bool paused = false;
+        if (world_context != nullptr) {
+            auto* const statics_class =
+                API::get()->find_uobject<API::UClass>(
+                    L"Class /Script/Engine.GameplayStatics");
+            auto* const statics = statics_class != nullptr
+                ? statics_class->get_class_default_object()
+                : nullptr;
+            auto* const function = statics_class != nullptr
+                ? statics_class->find_function(L"IsGamePaused")
+                : nullptr;
+            if (statics != nullptr && function != nullptr) {
+                IsGamePausedParams params{};
+                params.world_context = world_context;
+                statics->process_event(function, &params);
+                paused = params.return_value;
+            }
+        }
+        g_game_paused.store(paused, std::memory_order_release);
     }
 
     void clear_ue_visual_attachment() {
@@ -2853,6 +4983,21 @@ private:
     API::UObject* m_attached_component{};
     API::UObject* m_attached_weapon_actor{};
     std::vector<API::UObject*> m_attached_components{};
+    API::UObject* m_reticle_owner{};
+    API::UObject* m_world_reticle_component{};
+    API::UObject* m_world_reticle_widget{};
+    bool m_world_reticle_widget_rooted{};
+    API::UObject* m_world_reticle_image{};
+    bool m_world_reticle_pruned{};
+    API::UObject* m_world_reticle_pass_material{};
+    API::UObject* m_world_reticle_render_target{};
+    API::UObject* m_world_reticle_base_material{};
+    bool m_world_reticle_depth_test_was_disabled{};
+    bool m_world_reticle_depth_override_active{};
+    API::UObject* m_screen_reticle_image{};
+    bool m_screen_reticle_suppressed{};
+    API::UObject* m_shared_reticle_material{};
+    int m_reticle_state{-1};
 };
 
 std::unique_ptr<HaloCEMotionControls> g_plugin{

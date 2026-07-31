@@ -1,5 +1,10 @@
 # Halo Campaign Evolved standalone validation
 
+> Historical evidence from the 2026-07-29 standalone milestone. The payload
+> hashes below identify that run and are not the current release manifest.
+> Use `TESTING.md` and a fresh `Invoke-HaloModValidation.ps1` summary for the
+> current package/profile result.
+
 Validated on 2026-07-29 against Meta XR Simulator 205.0 and the installed
 `HaloSimulation_tag_release.dll` SHA-256
 `82B8A3A006BA3F981D6857DC7F4E4E929AE5282587F31F92F77A3FA78F4B2DAC`.

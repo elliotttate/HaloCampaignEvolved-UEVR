@@ -24,6 +24,11 @@ cmake_install.cmake
 *.log
 *.png
 evidence/
+/diagnostics/
+/dist/
+/tools/pose-matrix-results/
+/tools/pose-matrix-static-check-*/
+*.stackdump
 
 # Local experiments copied from full UEVR profiles. The standalone reticle has
 # no dependency on these libraries and some register incompatible callbacks.
