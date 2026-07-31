@@ -94,6 +94,7 @@ class RenderedReticleAnalyzerTests(unittest.TestCase):
         right_ring: bool = True,
         left_ring: bool = True,
         color=(160, 112, 100),
+        right_offset: int = 0,
         left_offset: int = 0,
         solid: bool = False,
         shield: bool = False,
@@ -101,14 +102,18 @@ class RenderedReticleAnalyzerTests(unittest.TestCase):
         right = textured_background()
         left = shifted_left_eye(right)
         if right_ring:
+            right_center = (RIGHT_CENTER[0] + right_offset, RIGHT_CENTER[1])
             if shield:
-                draw_shield(right, RIGHT_CENTER, color)
+                draw_shield(right, right_center, color)
             elif solid:
-                cv2.circle(right, RIGHT_CENTER, 8, color, -1, cv2.LINE_AA)
+                cv2.circle(right, right_center, 8, color, -1, cv2.LINE_AA)
             else:
-                draw_ring(right, RIGHT_CENTER, color)
+                draw_ring(right, right_center, color)
         if left_ring:
-            center = (LEFT_CENTER[0] + left_offset, LEFT_CENTER[1])
+            center = (
+                LEFT_CENTER[0] + right_offset + left_offset,
+                LEFT_CENTER[1],
+            )
             if shield:
                 draw_shield(left, center, color)
             elif solid:
@@ -143,6 +148,17 @@ class RenderedReticleAnalyzerTests(unittest.TestCase):
         self.assertTrue(result["passed"], result["failures"])
         self.assertLess(result["stereo_correspondence_error_px"], 2.0)
 
+    def test_accepts_dark_annulus_as_geometry_only(self) -> None:
+        left, right = self.write_pair(color=(20, 20, 20))
+        result = self.analyze(left, right)
+        self.assertTrue(result["passed"], result["failures"])
+        self.assertEqual(
+            result["right_ring"]["detection_method"],
+            "calibrated_dark_annulus_geometry_only",
+        )
+        self.assertFalse(result["right_ring"]["color_evaluable"])
+        self.assertIsNone(result["right_ring"]["color_pass"])
+
     def test_rejects_missing_right_ring(self) -> None:
         left, right = self.write_pair(right_ring=False)
         result = self.analyze(left, right)
@@ -169,6 +185,12 @@ class RenderedReticleAnalyzerTests(unittest.TestCase):
         result = self.analyze(left, right)
         self.assertFalse(result["passed"])
         self.assertTrue(any("stereo" in item for item in result["failures"]))
+
+    def test_rejects_common_two_eye_projection_offset(self) -> None:
+        left, right = self.write_pair(right_offset=10)
+        result = self.analyze(left, right)
+        self.assertFalse(result["passed"])
+        self.assertTrue(any("controller-ray projection" in item for item in result["failures"]))
 
 
 if __name__ == "__main__":

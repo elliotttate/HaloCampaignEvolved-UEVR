@@ -623,8 +623,9 @@ function Invoke-LiveTier {
         Invoke-ValidationCase RET-02 Live `
             'Rendered stereo reticle image oracle' {
             # VisualFire intentionally leaves the controller at its final
-            # (pitch-down) case.  The stereo oracle's calibrated search point
-            # is the neutral aim pose, so restore that pose before capturing.
+            # case.  Put the reticle over the dark rock at a calibrated 15
+            # degree yaw so HDR exposure cannot wash the cyan stroke into the
+            # bright neutral background before the stereo oracle sees it.
             foreach ($pose in @(
                 @{
                     hand = 'right'
@@ -639,7 +640,9 @@ function Invoke-LiveTier {
                     pose_type = 'aim'
                     base_space = 'local_floor'
                     position = @(0.30, -0.30, -0.555)
-                    orientation = @(0.0, 0.0, 0.0, 1.0)
+                    orientation = @(
+                        0.0, 0.13052619222005157,
+                        0.0, 0.9914448613738104)
                     duration_seconds = 0.0
                 }
             )) {
@@ -670,6 +673,7 @@ function Invoke-LiveTier {
                 '-3', $analyzer,
                 '--left', $artifacts[0],
                 '--right', $artifacts[1],
+                '--expected-right', '0.2551', '0.5091',
                 '--json', $json)
             if ($ReticleImage) {
                 $arguments += @('--authored', $ReticleImage)
@@ -703,7 +707,16 @@ function Invoke-SoakTier {
     Invoke-ValidationCase PERF-01 Soak `
         'Frame progression, process memory, and handle growth' {
         $samples = [System.Collections.Generic.List[object]]::new()
-        $initialStatus = Invoke-OperatorJson UEVR_Status
+        # Warm the Operator HTTP/status path before taking the resource
+        # baseline.  Its first requests lazily allocate a small persistent
+        # socket/event pool inside the game; counting that one-time setup as a
+        # per-minute leak produces a false failure on short soaks.
+        $initialStatus = $null
+        foreach ($warmupIndex in 1..3) {
+            $initialStatus = Invoke-OperatorJson UEVR_Status
+            Start-Sleep -Milliseconds 250
+        }
+        Start-Sleep -Milliseconds 750
         $initialSequence = [uint32](
             $initialStatus.halo_motion_controls.pose_diagnostics.sequence)
         $latestSequence = $initialSequence
@@ -736,22 +749,41 @@ function Invoke-SoakTier {
         }
         $csv = Join-Path $OutputDirectory 'soak-samples.csv'
         $samples | Export-Csv -LiteralPath $csv -NoTypeInformation
-        $first = $samples[0]
-        $last = $samples[$samples.Count - 1]
         if ($finalSequence -le $initialSequence) {
             throw 'Pose diagnostic sequence did not advance during soak.'
         }
-        $minutes = [Math]::Max($SoakSeconds / 60.0, 0.001)
-        $memoryRate = (($last.private_bytes - $first.private_bytes) / 1MB) /
-            $minutes
-        $handleRate = ($last.handles - $first.handles) / $minutes
+        # Handle counts and private bytes are noisy snapshots.  Compare the
+        # medians of equal start/end windows instead of two arbitrary samples.
+        $windowCount = [Math]::Max(
+            3,
+            [Math]::Min(10, [Math]::Floor($samples.Count / 5)))
+        $firstWindow = @($samples | Select-Object -First $windowCount)
+        $lastWindow = @($samples | Select-Object -Last $windowCount)
+        $firstPrivate = [double](
+            $firstWindow.private_bytes | Sort-Object |
+                Select-Object -Index ([Math]::Floor($windowCount / 2)))
+        $lastPrivate = [double](
+            $lastWindow.private_bytes | Sort-Object |
+                Select-Object -Index ([Math]::Floor($windowCount / 2)))
+        $firstHandles = [double](
+            $firstWindow.handles | Sort-Object |
+                Select-Object -Index ([Math]::Floor($windowCount / 2)))
+        $lastHandles = [double](
+            $lastWindow.handles | Sort-Object |
+                Select-Object -Index ([Math]::Floor($windowCount / 2)))
+        $firstUtc = [DateTime]::Parse($samples[0].utc).ToUniversalTime()
+        $lastUtc = [DateTime]::Parse(
+            $samples[$samples.Count - 1].utc).ToUniversalTime()
+        $minutes = [Math]::Max(($lastUtc - $firstUtc).TotalMinutes, 0.001)
+        $memoryRate = (($lastPrivate - $firstPrivate) / 1MB) / $minutes
+        $handleRate = ($lastHandles - $firstHandles) / $minutes
         if ($memoryRate -gt $MaximumPrivateBytesGrowthMbPerMinute) {
             throw "Private bytes grew $([Math]::Round($memoryRate,2)) MB/min."
         }
         if ($handleRate -gt $MaximumHandleGrowthPerMinute) {
             throw "Handles grew $([Math]::Round($handleRate,2))/min."
         }
-        "Samples=$($samples.Count); status_interval_seconds=$SoakStatusSampleSeconds; sequence_delta=$($finalSequence - $initialSequence); private_bytes_mb_per_min=$([Math]::Round($memoryRate,2)); handles_per_min=$([Math]::Round($handleRate,2)); $csv"
+        "Samples=$($samples.Count); median_window=$windowCount; status_interval_seconds=$SoakStatusSampleSeconds; sequence_delta=$($finalSequence - $initialSequence); private_bytes_mb_per_min=$([Math]::Round($memoryRate,2)); handles_per_min=$([Math]::Round($handleRate,2)); $csv"
     }
 }
 

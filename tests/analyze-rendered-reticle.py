@@ -42,6 +42,8 @@ class Candidate:
     median_hsv: tuple[float, float, float]
     center_annulus_contrast: float
     score: float
+    color_evaluable: bool = True
+    color_pass: bool | None = True
 
     def as_dict(self) -> dict:
         return {
@@ -59,6 +61,8 @@ class Candidate:
             "median_hsv": list(self.median_hsv),
             "center_annulus_contrast": self.center_annulus_contrast,
             "score": self.score,
+            "color_evaluable": self.color_evaluable,
+            "color_pass": self.color_pass,
         }
 
 
@@ -82,6 +86,7 @@ def parse_args() -> argparse.Namespace:
         default=0.04,
         help="Allowed normalized distance from the expected controller-ray point.",
     )
+    parser.add_argument("--maximum-projection-error", type=float, default=6.0)
     parser.add_argument("--maximum-stereo-error", type=float, default=6.0)
     parser.add_argument("--minimum-phase-response", type=float, default=0.05)
     return parser.parse_args()
@@ -384,7 +389,104 @@ def contour_candidates(
         if any(math.dist(candidate.center, item.center) <= 1.0 for item in unique):
             continue
         unique.append(candidate)
-    return unique
+    if unique:
+        return unique
+    dark = dark_annulus_candidate(image, expected, search_radius_px)
+    return [dark] if dark is not None else []
+
+
+def dark_annulus_candidate(
+    image: np.ndarray,
+    expected: tuple[float, float],
+    search_radius_px: float,
+) -> Candidate | None:
+    """Fit the exposure-darkened authored annulus at the calibrated ray only.
+
+    This is geometry evidence, not a color pass. The three-pixel center window
+    and narrow radius range deliberately prevent a generic dark scene circle
+    elsewhere in the search region from being promoted to the reticle.
+    """
+
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    expected_x, expected_y = expected
+    center_window = min(3.0, search_radius_px)
+    x0 = max(0, int(expected_x) - 13)
+    x1 = min(image.shape[1], int(expected_x) + 14)
+    y0 = max(0, int(expected_y) - 13)
+    y1 = min(image.shape[0], int(expected_y) + 14)
+    if x1 - x0 < 20 or y1 - y0 < 20:
+        return None
+    yy, xx = np.mgrid[y0:y1, x0:x1]
+    local = gray[y0:y1, x0:x1]
+    best: tuple[float, float, float, float, float, float] | None = None
+    for cy in np.arange(expected_y - center_window, expected_y + center_window + 0.01, 0.5):
+        for cx in np.arange(expected_x - center_window, expected_x + center_window + 0.01, 0.5):
+            distance = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
+            angle = (np.arctan2(yy - cy, xx - cx) + math.pi) % (2.0 * math.pi)
+            for radius in np.arange(4.0, 6.51, 0.5):
+                inner = distance <= radius - 2.0
+                ring = np.abs(distance - radius) <= 1.0
+                outer = (distance >= radius + 1.8) & (distance <= radius + 3.3)
+                if not np.any(inner) or not np.any(ring) or not np.any(outer):
+                    continue
+                segment_means = []
+                for segment in range(8):
+                    sector = (
+                        ring
+                        & (angle >= segment * math.pi / 4.0)
+                        & (angle < (segment + 1) * math.pi / 4.0)
+                    )
+                    if not np.any(sector):
+                        segment_means = []
+                        break
+                    segment_means.append(float(local[sector].mean()))
+                if not segment_means:
+                    continue
+                ring_mean = float(np.mean(segment_means))
+                contrast = (
+                    0.55 * (float(local[inner].mean()) - ring_mean)
+                    + 0.45 * (float(local[outer].mean()) - ring_mean)
+                )
+                angular_stddev = float(np.std(segment_means))
+                score = contrast - 0.25 * angular_stddev
+                candidate = (score, contrast, cx, cy, radius, angular_stddev)
+                if best is None or candidate > best:
+                    best = candidate
+    if best is None:
+        return None
+    score, contrast, cx, cy, radius, _angular_stddev = best
+    if score < 8.0 or contrast < 10.0:
+        return None
+    distance = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
+    ring = np.abs(distance - radius) <= 1.0
+    ring_pixels = image[y0:y1, x0:x1][ring]
+    median_bgr = tuple(float(value) for value in np.median(ring_pixels, axis=0))
+    ring_hsv = cv2.cvtColor(
+        ring_pixels.reshape((-1, 1, 3)), cv2.COLOR_BGR2HSV
+    ).reshape((-1, 3))
+    median_hsv = tuple(float(value) for value in np.median(ring_hsv, axis=0))
+    left = int(math.floor(cx - radius - 1.0))
+    top = int(math.floor(cy - radius - 1.0))
+    right = int(math.ceil(cx + radius + 1.0))
+    bottom = int(math.ceil(cy + radius + 1.0))
+    return Candidate(
+        detection_method="calibrated_dark_annulus_geometry_only",
+        center=(float(cx), float(cy)),
+        bbox=(left, top, right, bottom),
+        dimensions=(right - left + 1, bottom - top + 1),
+        area_px=int(ring.sum()),
+        hole_count=1,
+        inner_disc_occupancy=0.0,
+        annular_occupancy=1.0,
+        circularity=1.0,
+        distance=float(math.dist((cx, cy), expected)),
+        median_bgr=median_bgr,
+        median_hsv=median_hsv,
+        center_annulus_contrast=float(contrast),
+        score=float(score),
+        color_evaluable=False,
+        color_pass=None,
+    )
 
 
 def estimate_eye_shift(left: np.ndarray, right: np.ndarray) -> tuple[tuple[float, float], float]:
@@ -407,6 +509,7 @@ def analyze_pair(
     right_path: Path,
     expected_right_normalized: tuple[float, float] = DEFAULT_RIGHT_POINT,
     search_radius_normalized: float = 0.04,
+    maximum_projection_error: float = 6.0,
     maximum_stereo_error: float = 6.0,
     minimum_phase_response: float = 0.05,
     authored_path: Path | None = None,
@@ -434,6 +537,11 @@ def analyze_pair(
         failures.append(
             "right eye has no hollow blue/cyan ring near the expected controller-ray point"
         )
+    elif right_ring.distance > maximum_projection_error:
+        failures.append(
+            f"right-eye controller-ray projection error was {right_ring.distance:.3f}px, "
+            f"expected <= {maximum_projection_error:.3f}px"
+        )
 
     shift = (0.0, 0.0)
     phase_response = 0.0
@@ -445,8 +553,13 @@ def analyze_pair(
                 f"stereo background phase response was {phase_response:.4f}, "
                 f"expected >= {minimum_phase_response:.4f}"
             )
-        anchor = right_ring.center if right_ring is not None else expected_right
-        expected_left = (anchor[0] - shift[0], anchor[1] - shift[1])
+        # Keep the left-eye oracle independent of the detected right ring. A
+        # common displacement in both eyes must fail projection, not disappear
+        # by using one measured ring as the other eye's expected anchor.
+        expected_left = (
+            expected_right[0] - shift[0],
+            expected_right[1] - shift[1],
+        )
     except Exception as error:
         failures.append(str(error))
 
@@ -456,10 +569,21 @@ def analyze_pair(
         failures.append(
             "left eye has no hollow blue/cyan ring at the stereo-corresponding controller-ray point"
         )
+    elif left_ring.distance > maximum_projection_error:
+        failures.append(
+            f"left-eye controller-ray projection error was {left_ring.distance:.3f}px, "
+            f"expected <= {maximum_projection_error:.3f}px"
+        )
 
     stereo_error = None
     if left_ring is not None and right_ring is not None:
-        stereo_error = float(math.dist(left_ring.center, expected_left))
+        expected_left_from_right_ring = (
+            right_ring.center[0] - shift[0],
+            right_ring.center[1] - shift[1],
+        )
+        stereo_error = float(
+            math.dist(left_ring.center, expected_left_from_right_ring)
+        )
         if stereo_error > maximum_stereo_error:
             failures.append(
                 f"stereo reticle correspondence error was {stereo_error:.3f}px, "
@@ -480,6 +604,7 @@ def analyze_pair(
         "resolution": [width, height],
         "expected_right_point": list(expected_right),
         "search_radius_px": search_radius_px,
+        "maximum_projection_error_px": maximum_projection_error,
         "authored_reference": authored,
         "eye_background_shift_left_to_right": list(shift),
         "eye_background_phase_response": phase_response,
@@ -499,6 +624,7 @@ def main() -> int:
         args.right,
         tuple(args.expected_right),
         args.search_radius,
+        args.maximum_projection_error,
         args.maximum_stereo_error,
         args.minimum_phase_response,
         args.authored,

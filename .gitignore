@@ -40,3 +40,7 @@ scripts/libs/
 .idea/
 Thumbs.db
 .DS_Store
+
+# Python test/build caches
+__pycache__/
+*.py[cod]
