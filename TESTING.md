@@ -32,11 +32,19 @@ Run a non-firing live simulator smoke test after Halo is in a level:
 pwsh -NoProfile -File .\tools\Invoke-HaloModValidation.ps1 -Suite LiveSmoke
 ```
 
-Run the full automated build, 25-case pose, seven-case fire, reticle-capture,
-and package validation:
+Run the full automated build, 25-case pose, seven-case fire, six-angle stereo
+reticle sweep, head/controller independence, floating-hand geometry, two-hand,
+locomotion, and package validation:
 
 ```powershell
 pwsh -NoProfile -File .\tools\Invoke-HaloModValidation.ps1 -Suite Full
+```
+
+Run only the non-firing extended head/hand/input matrix against an existing
+session:
+
+```powershell
+pwsh -NoProfile -File .\tools\Invoke-HaloModValidation.ps1 -Suite Extended
 ```
 
 Run a ten-minute stability sample against an already-running session:
@@ -98,11 +106,52 @@ For target-color validation, capture the same weapon and reticle twice:
 4. Compare cyan and red masks with `--reference-mask`; color may change but ring
    geometry must not.
 
+Run all three captures as one strict transition test:
+
+```powershell
+pwsh -NoProfile -File .\tools\Test-HaloReticleColorSequence.ps1 `
+    -CyanImage E:\Temp\reticle-world.png `
+    -HostileRedImage E:\Temp\reticle-hostile.png `
+    -RecoveredCyanImage E:\Temp\reticle-recovered.png
+```
+
+The runner requires cyan, then red, then cyan; hostile and recovered masks must
+each retain at least 0.90 IoU with the baseline authored ring.
+
 The full suite also captures both composited eyes. Review those images for one
 small ring at the predicted ten-metre point, identical world placement in the
 two eye views, no centered HUD duplicate, no sphere/cylinder, no mirror, and
 no grey material substitution. A white tree or bright scene feature does not
 count as reticle evidence.
+
+The composited-eye oracle requires verifiable blue/cyan stroke color by
+default. It may still report a calibrated dark annulus as diagnostic geometry,
+but that result fails release validation instead of promoting a dark/grey
+material regression to a pass. `--allow-geometry-only` exists only for
+investigation and must never be used for release evidence.
+
+## Recommended execution order
+
+1. `Plan`: inventory every automatic, partial, and manual gate without touching
+   a running session.
+2. `Offline`: build, run all harness self-tests, validate hook signatures,
+   profile policy, deployment parity, and package hashes.
+3. `LiveSmoke`: prove the loaded OpenXR/game/plugin state and run the non-firing
+   25-case 6DOF matrix.
+4. `Full`: repeat the offline/live gates, fire the seven-case ballistic matrix,
+   capture the strict stereo reticle oracle and six-angle sweep, then run the
+   HMD, floating-hand, two-hand, and locomotion matrices.
+5. Weapon/lifecycle/standalone checklist: complete `WPN-01`, `LIFE-01`, and
+   `DEP-01`; preserve the summary, images, and logs for each transition.
+6. `Soak`: run at least ten minutes, followed by the paired control/candidate
+   frame-time captures described below.
+7. Real headset: finish `HMD-02` last, including perceived latency, stereo
+   stability, extreme-reach geometry, projectile agreement, and audio A/B.
+
+`PASS` means an objective assertion ran. `MANUAL` means the automated subset
+passed but the current diagnostics ABI cannot prove the remaining condition.
+`SKIP` means required evidence was not supplied. Neither is silently counted as
+a full pass.
 
 ## Test series and pass criteria
 

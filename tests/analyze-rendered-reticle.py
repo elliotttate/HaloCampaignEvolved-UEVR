@@ -89,6 +89,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--maximum-projection-error", type=float, default=6.0)
     parser.add_argument("--maximum-stereo-error", type=float, default=6.0)
     parser.add_argument("--minimum-phase-response", type=float, default=0.05)
+    parser.add_argument(
+        "--allow-geometry-only",
+        action="store_true",
+        help=(
+            "Permit a calibrated dark annulus when its blue/cyan color cannot "
+            "be verified. This is diagnostic-only; release validation must "
+            "leave this disabled."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -513,6 +522,7 @@ def analyze_pair(
     maximum_stereo_error: float = 6.0,
     minimum_phase_response: float = 0.05,
     authored_path: Path | None = None,
+    require_color: bool = True,
 ) -> dict:
     left = load_bgr8(left_path)
     right = load_bgr8(right_path)
@@ -541,6 +551,11 @@ def analyze_pair(
         failures.append(
             f"right-eye controller-ray projection error was {right_ring.distance:.3f}px, "
             f"expected <= {maximum_projection_error:.3f}px"
+        )
+    if right_ring is not None and require_color and not right_ring.color_evaluable:
+        failures.append(
+            "right-eye ring geometry was present, but its authored blue/cyan "
+            "color was not verifiable"
         )
 
     shift = (0.0, 0.0)
@@ -574,6 +589,11 @@ def analyze_pair(
             f"left-eye controller-ray projection error was {left_ring.distance:.3f}px, "
             f"expected <= {maximum_projection_error:.3f}px"
         )
+    if left_ring is not None and require_color and not left_ring.color_evaluable:
+        failures.append(
+            "left-eye ring geometry was present, but its authored blue/cyan "
+            "color was not verifiable"
+        )
 
     stereo_error = None
     if left_ring is not None and right_ring is not None:
@@ -605,6 +625,7 @@ def analyze_pair(
         "expected_right_point": list(expected_right),
         "search_radius_px": search_radius_px,
         "maximum_projection_error_px": maximum_projection_error,
+        "require_reticle_color": require_color,
         "authored_reference": authored,
         "eye_background_shift_left_to_right": list(shift),
         "eye_background_phase_response": phase_response,
@@ -628,6 +649,7 @@ def main() -> int:
         args.maximum_stereo_error,
         args.minimum_phase_response,
         args.authored,
+        require_color=not args.allow_geometry_only,
     )
     output = json.dumps(result, indent=2)
     print(output)

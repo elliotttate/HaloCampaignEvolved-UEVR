@@ -100,6 +100,12 @@ function ConvertTo-DoubleVector {
         [double]$Value.z)
 }
 
+function Test-FiniteDouble {
+    param([double]$Value)
+    return -not [double]::IsNaN($Value) -and
+        -not [double]::IsInfinity($Value)
+}
+
 function ConvertTo-DoubleQuaternion {
     param(
         [Parameter(Mandatory)]
@@ -128,7 +134,7 @@ function ConvertTo-DoubleQuaternion {
         $result[1] * $result[1] +
         $result[2] * $result[2] +
         $result[3] * $result[3])
-    if (-not [double]::IsFinite($length) -or $length -lt 1.0e-12) {
+    if (-not (Test-FiniteDouble $length) -or $length -lt 1.0e-12) {
         throw 'Quaternion was non-finite or had zero length.'
     }
     return @($result | ForEach-Object { $_ / $length })
@@ -182,7 +188,7 @@ function Get-VectorLength {
 function Normalize-Vector {
     param([double[]]$Value)
     $length = Get-VectorLength -Value $Value
-    if (-not [double]::IsFinite($length) -or $length -lt 1.0e-12) {
+    if (-not (Test-FiniteDouble $length) -or $length -lt 1.0e-12) {
         throw 'Cannot normalize a non-finite or zero-length vector.'
     }
     return Scale-Vector -Value $Value -Scale (1.0 / $length)

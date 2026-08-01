@@ -18,7 +18,7 @@ validation, but neither is required at runtime and neither is included here.
    powershell -NoProfile -ExecutionPolicy Bypass -File .\Verify-Package.ps1
    ```
 
-3. Install the Halo profile files and required UEVR settings:
+3. Install the Halo profile files, reticle LogicMod, and required UEVR settings:
 
    ```powershell
    powershell -NoProfile -ExecutionPolicy Bypass -File .\Install-HaloCEVR.ps1
@@ -30,7 +30,26 @@ The installer copies only these runtime mod files:
 %APPDATA%\UnrealVRMod\HaloCampaignEvolved\
 |-- plugins\HaloCEMotionControls.dll
 `-- scripts\halo_motion_reticle.lua
+
+<Halo game directory>\Meteorite\Content\Paks\LogicMods\
+|-- HaloCEReticleColor.pak
+|-- HaloCEReticleColor.utoc
+`-- HaloCEReticleColor.ucas
 ```
+
+The game directory is discovered from a running Halo process or Steam's
+library manifests. If discovery cannot find a non-default Steam library, pass
+it explicitly:
+
+```powershell
+.\Install-HaloCEVR.ps1 `
+  -GameRoot 'D:\SteamLibrary\steamapps\common\Halo Campaign Evolved'
+```
+
+The LogicMod contains only the two UE 5.6 VR-widget material packages used to
+keep Halo's authored cyan/red reticle color stable under eye adaptation. It
+deliberately does not ship `global.utoc` or `global.ucas`; those files belong
+to the game and must never be replaced by a mod.
 
 It also updates the existing `config.txt` and three camera presets with the
 motion-control-safe aim, pitch, interpolation, hand, and world-scale values.
@@ -92,10 +111,11 @@ Close Halo and run:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\Uninstall-HaloCEVR.ps1
 ```
 
-The uninstaller removes only the two files installed by this package and
-restores the first-install configuration backup when it can do so without
-overwriting later user changes. Use `-Force` only if you intentionally want to
-restore the backup over a subsequently edited profile.
+The uninstaller removes the profile and LogicMod files installed by this
+package and restores first-install backups when it can do so without
+overwriting later user changes. The recorded game directory is used
+automatically. Use `-Force` only if you intentionally want to restore backups
+over subsequently edited files.
 
 ## Troubleshooting
 

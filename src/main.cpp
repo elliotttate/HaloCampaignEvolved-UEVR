@@ -138,7 +138,8 @@ struct UnrealLinearColor {
 };
 
 constexpr double kWorldReticleScale = 1.0;
-constexpr float kWorldReticleEmissiveGain = 4.0f;
+constexpr float kWorldReticleFallbackEmissiveGain = 4.0f;
+constexpr float kWorldReticleExposureCompensatedGain = 1.0f;
 
 template <typename T>
 bool write_function_parameter(
@@ -886,6 +887,31 @@ Quat normalized(const Quat& value) {
         value.y * inverse,
         value.z * inverse,
         value.w * inverse};
+}
+
+Quat quaternion_between(const Vec3& source, const Vec3& destination) {
+    const auto from = normalized(source);
+    const auto to = normalized(destination);
+    if (length_squared(from) < 0.8f || length_squared(to) < 0.8f) {
+        return {};
+    }
+
+    const auto alignment = std::clamp(dot(from, to), -1.0f, 1.0f);
+    if (alignment > 0.9999f) {
+        return {};
+    }
+
+    if (alignment < -0.9999f) {
+        auto axis = cross(from, {1.0f, 0.0f, 0.0f});
+        if (length_squared(axis) < 1.0e-6f) {
+            axis = cross(from, {0.0f, 1.0f, 0.0f});
+        }
+        axis = normalized(axis);
+        return {axis.x, axis.y, axis.z, 0.0f};
+    }
+
+    const auto axis = cross(from, to);
+    return normalized({axis.x, axis.y, axis.z, 1.0f + alignment});
 }
 
 Quat conjugate(const Quat& value) {
@@ -3623,6 +3649,7 @@ public:
         publish_gameplay_ready(false, true);
         publish_reticle_hide(false, true);
         g_replacement_reticle_active.store(false, std::memory_order_release);
+        API::VR::clear_openxr_compositor_quad();
         API::UObjectHook::activate();
         // The native weapon/palette/projectile path below reads the raw
         // right-controller pose directly. UEVR's global RIGHT_CONTROLLER aim
@@ -3666,6 +3693,7 @@ public:
         update_tracking_snapshot();
         update_two_hand_hold(delta);
         update_world_reticle_transform();
+        update_openxr_reticle_quad();
 
         if (!m_native_hook_attempted) {
             // Retry while the simulation DLL is still loading, but make a
@@ -3690,6 +3718,13 @@ public:
         refresh_replacement_reticle_state();
         maintain_weapon_attachment();
         maintain_world_reticle_widget();
+    }
+
+    void on_device_reset() override {
+        if (m_armed) {
+            API::VR::clear_openxr_compositor_quad();
+            m_openxr_reticle_published = false;
+        }
     }
 
     void on_pre_viewport_client_draw(
@@ -3835,6 +3870,46 @@ private:
         return nullptr;
     }
 
+    API::UObject* find_active_world_reticle_component(
+        API::UClass* widget_component_class,
+        API::UObject* owner) {
+        auto* const objects = API::FUObjectArray::get();
+        if (objects == nullptr || widget_component_class == nullptr ||
+            owner == nullptr) {
+            return nullptr;
+        }
+
+        // The Lua profile intentionally leaves pawn-owned components hidden
+        // during teardown because destroying a component while Unreal is
+        // unloading a world can race the engine. Those inert components may
+        // remain in GUObjectArray and recycled slots are not ordered by
+        // creation time. Selecting merely the first WidgetComponent_ can
+        // therefore resurrect an old hidden component while Lua continues to
+        // drive the current visible one. Require the component-created widget
+        // and the visibility state that Lua establishes before it publishes
+        // the ready marker. Once selected, the cached pointer is retained
+        // while zoom/two-hand mode temporarily hides it.
+        for (auto index = objects->get_object_count() - 1;
+             index >= 0;
+             --index) {
+            auto* const object = objects->get_object(index);
+            if (object == nullptr ||
+                !object->is_a(widget_component_class) ||
+                !has_outer(object, owner) ||
+                object->get_full_name().find(L"WidgetComponent_") ==
+                    std::wstring::npos ||
+                object->get_bool_property(L"bHiddenInGame")) {
+                continue;
+            }
+            auto* const widget =
+                object->get_property_data<API::UObject*>(L"Widget");
+            if (widget != nullptr && *widget != nullptr) {
+                return object;
+            }
+        }
+        return nullptr;
+    }
+
     API::UObject* find_screen_reticle_image(API::UClass* required_class) {
         auto* const objects = API::FUObjectArray::get();
         if (objects == nullptr || required_class == nullptr) {
@@ -3904,6 +3979,29 @@ private:
         if (render_target == nullptr || material_instance == nullptr) {
             return false;
         }
+
+        bool exposure_compensated = false;
+        auto* material = material_instance;
+        for (int depth = 0; material != nullptr && depth < 8; ++depth) {
+            if (material->get_full_name().find(
+                    L"WidgetVRPassThrough") != std::wstring::npos) {
+                exposure_compensated = true;
+                break;
+            }
+            auto* const parent =
+                material->get_property_data<API::UObject*>(L"Parent");
+            material = parent == nullptr ? nullptr : *parent;
+        }
+        if (exposure_compensated !=
+            m_world_reticle_exposure_compensated) {
+            API::get()->log_info(
+                exposure_compensated
+                    ? "HaloCEMotionControls: world reticle uses the "
+                      "exposure-compensated VR pass-through material"
+                    : "HaloCEMotionControls: world reticle fell back to "
+                      "the stock Widget3D pass material");
+        }
+        m_world_reticle_exposure_compensated = exposure_compensated;
 
         static const API::FName slate_ui{L"SlateUI"};
         auto* current_texture = static_cast<API::UObject*>(nullptr);
@@ -4361,6 +4459,7 @@ private:
     }
 
     void reset_world_reticle_cache(API::UObject* owner) {
+        clear_openxr_reticle_quad(true);
         restore_world_reticle_depth_test();
         if (m_world_reticle_widget_rooted) {
             set_uobject_rooted(m_world_reticle_widget, false);
@@ -4373,9 +4472,49 @@ private:
         m_world_reticle_pruned = false;
         m_world_reticle_pass_material = nullptr;
         m_world_reticle_render_target = nullptr;
+        m_world_reticle_exposure_compensated = false;
         m_screen_reticle_image = nullptr;
         m_screen_reticle_suppressed = false;
         m_shared_reticle_material = nullptr;
+    }
+
+    bool set_world_reticle_main_pass(bool enabled) {
+        if (m_world_reticle_component == nullptr) {
+            return false;
+        }
+
+        auto* const function =
+            m_world_reticle_component->get_class()->find_function(
+                L"SetRenderInMainPass");
+        std::array<std::byte, 32> parameters{};
+        if (function == nullptr ||
+            (!write_function_parameter(
+                 function,
+                 parameters,
+                 L"bValue",
+                 enabled) &&
+             !write_function_parameter(
+                 function,
+                 parameters,
+                 L"bRenderInMainPass",
+                 enabled))) {
+            return false;
+        }
+
+        m_world_reticle_component->process_event(function, parameters.data());
+        return true;
+    }
+
+    void clear_openxr_reticle_quad(bool restore_world_geometry) {
+        if (m_openxr_reticle_published) {
+            API::VR::clear_openxr_compositor_quad();
+            m_openxr_reticle_published = false;
+        }
+
+        if (restore_world_geometry && m_world_reticle_main_pass_disabled) {
+            set_world_reticle_main_pass(true);
+            m_world_reticle_main_pass_disabled = false;
+        }
     }
 
     void log_reticle_state(int state, const char* message) {
@@ -4406,10 +4545,10 @@ private:
             api->find_uobject<API::UClass>(
                 L"Class /Script/UMG.WidgetComponent");
         if (m_world_reticle_component == nullptr) {
-            m_world_reticle_component = find_reticle_object(
-                widget_component_class,
-                L"WidgetComponent_",
-                owner);
+            m_world_reticle_component =
+                find_active_world_reticle_component(
+                    widget_component_class,
+                    owner);
         }
         if (m_world_reticle_component == nullptr) {
             log_reticle_state(
@@ -4534,16 +4673,31 @@ private:
                 return;
             }
         }
+        // SetDrawSize can replace both the render target and Widget3D MID.
+        // Bind first so the parent-chain check below knows whether the cooked
+        // EyeAdaptationInverse pass is active. That pass preserves authored
+        // cyan/red at unit tint; the stock fallback retains the old gain.
+        if (!bind_world_reticle_render_target()) {
+            log_reticle_state(
+                11,
+                "HaloCEMotionControls: failed to bind Widget3D SlateUI "
+                "render target");
+            return;
+        }
+        const float expected_gain =
+            m_world_reticle_exposure_compensated
+                ? kWorldReticleExposureCompensatedGain
+                : kWorldReticleFallbackEmissiveGain;
         auto* const tint =
             m_world_reticle_component
                 ->get_property_data<UnrealLinearColor>(
                     L"TintColorAndOpacity");
         if (tint == nullptr ||
-            std::abs(tint->r - kWorldReticleEmissiveGain) > 0.001f ||
-            std::abs(tint->g - kWorldReticleEmissiveGain) > 0.001f ||
-            std::abs(tint->b - kWorldReticleEmissiveGain) > 0.001f ||
+            std::abs(tint->r - expected_gain) > 0.001f ||
+            std::abs(tint->g - expected_gain) > 0.001f ||
+            std::abs(tint->b - expected_gain) > 0.001f ||
             std::abs(tint->a - 1.0f) > 0.001f) {
-            if (!set_world_reticle_tint(kWorldReticleEmissiveGain)) {
+            if (!set_world_reticle_tint(expected_gain)) {
                 log_reticle_state(
                     13,
                     "HaloCEMotionControls: failed to enforce world "
@@ -4558,13 +4712,6 @@ private:
         // the old (or null) texture. The render target then contains the
         // correct cyan ring while the world quad samples black. Verify and
         // repair the binding against the component's current objects.
-        if (!bind_world_reticle_render_target()) {
-            log_reticle_state(
-                11,
-                "HaloCEMotionControls: failed to bind Widget3D SlateUI "
-                "render target");
-            return;
-        }
         if (!disable_world_reticle_depth_test()) {
             log_reticle_state(
                 14,
@@ -4755,6 +4902,101 @@ private:
         m_world_reticle_component->process_event(
             set_transform,
             transform_parameters.data());
+    }
+
+    void update_openxr_reticle_quad() {
+        const bool visible =
+            API::VR::is_openxr() &&
+            g_replacement_reticle_active.load(std::memory_order_acquire) &&
+            !g_two_hand_hold_latched.load(std::memory_order_acquire) &&
+            !g_local_zoomed.load(std::memory_order_acquire) &&
+            m_world_reticle_component != nullptr &&
+            m_world_reticle_render_target != nullptr;
+        if (!visible) {
+            clear_openxr_reticle_quad(true);
+            return;
+        }
+
+        TrackingSnapshot tracking{};
+        {
+            const std::scoped_lock lock{g_tracking_mutex};
+            tracking = g_tracking_snapshot;
+        }
+        if (!tracking.valid) {
+            clear_openxr_reticle_quad(true);
+            return;
+        }
+
+        const auto hmd_rotation = normalized(tracking.hmd_rotation);
+        const auto aim_rotation = normalized(tracking.right_aim_rotation);
+        const auto inverse_hmd_rotation = conjugate(hmd_rotation);
+        const auto aim_relative = normalized(inverse_hmd_rotation * aim_rotation);
+        const auto controller_basis = effective_controller_basis(
+            tracking,
+            inverse_hmd_rotation,
+            aim_relative);
+        if (!valid_basis(controller_basis)) {
+            clear_openxr_reticle_quad(true);
+            return;
+        }
+
+        // This is the inverse of openxr_to_blam(). Applying it to the shared
+        // controller basis gives the exact HMD-local ray used by the visual
+        // weapon, native marker hooks, projectile hooks, and world widget.
+        const Vec3 local_direction_xr{
+            -controller_basis.forward.y,
+            controller_basis.forward.z,
+            -controller_basis.forward.x};
+        const auto stage_direction = normalized(
+            rotate(hmd_rotation, local_direction_xr));
+        if (!finite(stage_direction) ||
+            length_squared(stage_direction) < 0.8f) {
+            clear_openxr_reticle_quad(true);
+            return;
+        }
+
+        constexpr float reticle_distance_meters = 10.0f;
+        constexpr float reticle_texture_extent_meters = 2.5f;
+        const auto target =
+            tracking.hmd_position + stage_direction * reticle_distance_meters;
+        // An OpenXR quad's authored front face is +Z. Rotate that normal back
+        // toward the HMD so the one-sided alpha surface is visible. The ring
+        // is rotationally symmetric, so no controller roll is needed here.
+        const auto face_hmd = quaternion_between(
+            {0.0f, 0.0f, 1.0f},
+            normalized(tracking.hmd_position - target));
+
+        UEVR_OpenXRCompositorQuadState state{};
+        state.size = sizeof(state);
+        state.flags = UEVR_OPENXR_COMPOSITOR_QUAD_VISIBLE;
+        state.texture = m_world_reticle_render_target->to_handle();
+        state.position = {target.x, target.y, target.z};
+        state.rotation = {
+            face_hmd.x,
+            face_hmd.y,
+            face_hmd.z,
+            face_hmd.w};
+        state.size_meters = {
+            reticle_texture_extent_meters,
+            reticle_texture_extent_meters};
+
+        if (!API::VR::set_openxr_compositor_quad(state)) {
+            clear_openxr_reticle_quad(true);
+            return;
+        }
+
+        m_openxr_reticle_published = true;
+        // Keep the WidgetComponent rendering its 250x250 target, but remove
+        // its mesh from the Unreal main pass. This eliminates the old grey
+        // plane/cylinder without suppressing the live authored pixels copied
+        // into the compositor swapchain.
+        if (!m_world_reticle_main_pass_disabled &&
+            set_world_reticle_main_pass(false)) {
+            m_world_reticle_main_pass_disabled = true;
+            API::get()->log_info(
+                "HaloCEMotionControls: dedicated OpenXR reticle quad active; "
+                "world WidgetComponent geometry removed from the main pass");
+        }
     }
 
     // Two-hand latch and blend, decided once per engine tick from the
@@ -4991,9 +5233,12 @@ private:
     bool m_world_reticle_pruned{};
     API::UObject* m_world_reticle_pass_material{};
     API::UObject* m_world_reticle_render_target{};
+    bool m_world_reticle_exposure_compensated{};
     API::UObject* m_world_reticle_base_material{};
     bool m_world_reticle_depth_test_was_disabled{};
     bool m_world_reticle_depth_override_active{};
+    bool m_openxr_reticle_published{};
+    bool m_world_reticle_main_pass_disabled{};
     API::UObject* m_screen_reticle_image{};
     bool m_screen_reticle_suppressed{};
     API::UObject* m_shared_reticle_material{};

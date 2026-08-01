@@ -38,10 +38,16 @@ foreach ($required in @(
     'reticle_hide_marker',
     'unavailable_abi_gates',
     'Get-NetTCPConnection -State Listen -LocalPort',
+    '$ExpectedGamePid = 0',
+    '$ExpectedGamePid = [int]$owners[0]',
     'Set-ExplicitRig $original.Head.Position')) {
     if (-not $source.Contains($required)) {
         throw "Extended validation script is missing required token '$required'."
     }
+}
+
+if ($source.Contains('[int]$ExpectedGamePid = 11856')) {
+    throw 'Extended validation still contains a stale session-specific PID.'
 }
 
 $plan = & powershell -NoProfile -ExecutionPolicy Bypass `

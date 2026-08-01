@@ -266,6 +266,7 @@ VR_ControllersAllowed=true
 VR_ForceMotionControlsActive=true
 VR_DecoupledPitch=false
 VR_DecoupledPitchUIAdjust=false
+UI_ExternalCompositorQuad=true
 VR_AimMethod=0
 VR_AimModifyPlayerControlRotation=false
 VR_AimUsePawnControlRotation=false

@@ -27,6 +27,7 @@ foreach ($path in @($stageRoot, $zipPath, $zipChecksumPath)) {
 $null = New-Item -ItemType Directory -Path $stageRoot -Force
 $null = New-Item -ItemType Directory -Path (Join-Path $stageRoot 'plugins') -Force
 $null = New-Item -ItemType Directory -Path (Join-Path $stageRoot 'scripts') -Force
+$null = New-Item -ItemType Directory -Path (Join-Path $stageRoot 'logicmods') -Force
 
 $copyMap = [ordered]@{
     'LuaVR.dll' = 'LuaVR.dll'
@@ -57,6 +58,15 @@ Copy-Item -LiteralPath $plugin -Destination (
     Join-Path $stageRoot 'plugins\HaloCEMotionControls.dll')
 Copy-Item -LiteralPath (Join-Path $repoRoot 'scripts\halo_motion_reticle.lua') `
     -Destination (Join-Path $stageRoot 'scripts\halo_motion_reticle.lua')
+foreach ($name in @('HaloCEReticleColor.pak', 'HaloCEReticleColor.utoc',
+        'HaloCEReticleColor.ucas')) {
+    $source = Join-Path $repoRoot "logicmods\$name"
+    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+        throw "Reticle LogicMod payload is missing: $source"
+    }
+    Copy-Item -LiteralPath $source -Destination (
+        Join-Path $stageRoot "logicmods\$name")
+}
 
 foreach ($name in @('Install-HaloCEVR.ps1', 'Uninstall-HaloCEVR.ps1',
         'Verify-Package.ps1')) {
@@ -78,7 +88,7 @@ $readme = $readme.Replace('@VERSION@', $Version).Replace(
     [System.Text.UTF8Encoding]::new($false))
 
 $manifest = [ordered]@{
-    schema_version = 1
+    schema_version = 2
     package = $packageName
     version = $Version
     source_repository = 'https://github.com/elliotttate/HaloCampaignEvolved-UEVR'
@@ -91,6 +101,14 @@ $manifest = [ordered]@{
         Join-Path $stageRoot 'scripts\halo_motion_reticle.lua') -Algorithm SHA256).Hash
     uevr_backend_sha256 = (Get-FileHash -LiteralPath (
         Join-Path $stageRoot 'UEVRBackend.dll') -Algorithm SHA256).Hash
+    reticle_logicmod_sha256 = [ordered]@{
+        pak = (Get-FileHash -LiteralPath (
+            Join-Path $stageRoot 'logicmods\HaloCEReticleColor.pak') -Algorithm SHA256).Hash
+        utoc = (Get-FileHash -LiteralPath (
+            Join-Path $stageRoot 'logicmods\HaloCEReticleColor.utoc') -Algorithm SHA256).Hash
+        ucas = (Get-FileHash -LiteralPath (
+            Join-Path $stageRoot 'logicmods\HaloCEReticleColor.ucas') -Algorithm SHA256).Hash
+    }
 }
 $manifest | ConvertTo-Json | Set-Content -LiteralPath (
     Join-Path $stageRoot 'RELEASE-MANIFEST.json') -Encoding utf8

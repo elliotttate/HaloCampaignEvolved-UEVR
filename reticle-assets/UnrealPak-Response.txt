@@ -1,0 +1,4 @@
+"E:/Github/HaloCampaignEvolved-UEVR/reticle-assets/Saved/Cooked/Windows/Engine/Content/VREditor/UI/WidgetVRPassThrough.uasset" "../../../Engine/Content/VREditor/UI/WidgetVRPassThrough.uasset"
+"E:/Github/HaloCampaignEvolved-UEVR/reticle-assets/Saved/Cooked/Windows/Engine/Content/VREditor/UI/WidgetVRPassThrough.uexp" "../../../Engine/Content/VREditor/UI/WidgetVRPassThrough.uexp"
+"E:/Github/HaloCampaignEvolved-UEVR/reticle-assets/Saved/Cooked/Windows/Engine/Content/VREditor/UI/WidgetVRPassThrough_Translucent_OneSided.uasset" "../../../Engine/Content/VREditor/UI/WidgetVRPassThrough_Translucent_OneSided.uasset"
+"E:/Github/HaloCampaignEvolved-UEVR/reticle-assets/Saved/Cooked/Windows/Engine/Content/VREditor/UI/WidgetVRPassThrough_Translucent_OneSided.uexp" "../../../Engine/Content/VREditor/UI/WidgetVRPassThrough_Translucent_OneSided.uexp"

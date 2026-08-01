@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [int]$ExpectedGamePid = 11856,
+    [ValidateRange(0, [int]::MaxValue)]
+    [int]$ExpectedGamePid = 0,
 
     [int]$OperatorPort = 8720,
 
@@ -48,16 +49,25 @@ $proxyPath = Join-Path $OperatorPackageRoot (
     'meta-xr-operator\windows\meta-xr-operator-mcp-proxy.exe')
 $proxyPath = (Resolve-Path -LiteralPath $proxyPath).Path
 
-$game = Get-CimInstance Win32_Process -Filter "ProcessId=$ExpectedGamePid"
-if ($null -eq $game -or $game.Name -ne 'HaloCampaignEvolved.exe') {
-    throw "PID $ExpectedGamePid is not the requested Halo process."
-}
 $listeners = @(Get-NetTCPConnection -State Listen -LocalPort $OperatorPort)
 $owners = @($listeners | Select-Object -ExpandProperty OwningProcess -Unique)
-if ($owners.Count -ne 1 -or [int]$owners[0] -ne $ExpectedGamePid) {
+if ($owners.Count -ne 1) {
     throw (
-        "Operator port $OperatorPort is not owned exclusively by Halo PID " +
-        "$ExpectedGamePid; observed owners: $($owners -join ',').")
+        "Operator port $OperatorPort does not have exactly one owner; " +
+        "observed owners: $($owners -join ',').")
+}
+if ($ExpectedGamePid -eq 0) {
+    $ExpectedGamePid = [int]$owners[0]
+} elseif ([int]$owners[0] -ne $ExpectedGamePid) {
+    throw (
+        "Operator port $OperatorPort is owned by PID $($owners[0]), not " +
+        "requested Halo PID $ExpectedGamePid.")
+}
+$game = Get-CimInstance Win32_Process -Filter "ProcessId=$ExpectedGamePid"
+if ($null -eq $game -or $game.Name -ne 'HaloCampaignEvolved.exe') {
+    throw (
+        "Operator port $OperatorPort owner PID $ExpectedGamePid is not " +
+        "HaloCampaignEvolved.exe.")
 }
 
 $startInfo = [System.Diagnostics.ProcessStartInfo]::new($proxyPath)

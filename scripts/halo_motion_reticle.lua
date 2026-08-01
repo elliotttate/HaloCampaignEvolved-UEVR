@@ -27,6 +27,14 @@ local last_error = nil
 local last_release_reason = nil
 local proof_frames = 0
 local restore_widget_to_screen = nil
+local exposure_compensated_widget_material = nil
+local exposure_material_load_attempted = false
+
+local exposure_material_path =
+    "MaterialInstanceConstant " ..
+    "/Engine/VREditor/UI/" ..
+    "WidgetVRPassThrough_Translucent_OneSided." ..
+    "WidgetVRPassThrough_Translucent_OneSided"
 
 -- UObjectHook.exists() only consults objects observed after activation.
 -- Activate before creating either dynamic component so the constructor and
@@ -222,6 +230,86 @@ local function new_identity_transform()
     return transform
 end
 
+local function class_default_object(class_path)
+    local class = api:find_uobject(class_path)
+    if class == nil or class.get_class_default_object == nil then
+        return nil
+    end
+    return class:get_class_default_object()
+end
+
+local function fname_from_string(value)
+    local string_library = class_default_object(
+        "Class /Script/Engine.KismetStringLibrary")
+    if string_library == nil or
+        string_library.Conv_StringToName == nil then
+        return nil
+    end
+    return string_library:Conv_StringToName(value)
+end
+
+-- The stock Widget3D pass is unlit but still multiplied by Unreal's
+-- pre-exposure, so Halo's authored cyan pixels can become a dim grey after
+-- the filmic tonemapper. UE5.6's VR Editor pass-through material applies
+-- EyeAdaptationInverse to the SlateUI color before the same composition.
+-- The tiny LogicMod shipped with this profile cooks that engine asset into
+-- Halo; load it through AssetRegistry so the standalone Lua profile does not
+-- depend on the MCP or on an editor-only package already being resident.
+local function load_exposure_compensated_widget_material()
+    if exposure_material_load_attempted then
+        return exposure_compensated_widget_material
+    end
+    exposure_material_load_attempted = true
+
+    -- A mounted package may already have loaded the object while its asset
+    -- registry was scanned. Prefer the direct path before constructing the
+    -- soft reference used by LoadAsset_Blocking.
+    exposure_compensated_widget_material =
+        api:find_uobject(exposure_material_path)
+    if exposure_compensated_widget_material ~= nil then
+        return exposure_compensated_widget_material
+    end
+
+    local ok, loaded = pcall(function()
+        local system_library = class_default_object(
+            "Class /Script/Engine.KismetSystemLibrary")
+        if system_library == nil or
+            system_library.MakeSoftObjectPath == nil or
+            system_library.LoadAsset_Blocking == nil then
+            return nil
+        end
+
+        -- The LogicMod's tiny IoStore container is mounted by Unreal's package
+        -- store, but it deliberately does not replace the game's global asset
+        -- registry.  Constructing fake FAssetData therefore makes the package
+        -- load depend on registry metadata that is not present.  A soft object
+        -- path goes straight through StaticLoadObject/package-store lookup and
+        -- is the same path Blueprint uses for an uncooked soft reference.
+        local soft_path = system_library:MakeSoftObjectPath(
+            exposure_material_path)
+        if soft_path == nil then
+            return nil
+        end
+        return system_library:LoadAsset_Blocking(soft_path)
+    end)
+    if ok then
+        exposure_compensated_widget_material = loaded
+    end
+    if exposure_compensated_widget_material == nil then
+        publish_diagnostic(
+            "exposure-compensated reticle material unavailable; " ..
+            "falling back to stock Widget3D pass")
+        print(
+            "[Halo motion reticle] exposure-compensated Widget3D " ..
+            "material unavailable; install the bundled LogicMod")
+    else
+        print(
+            "[Halo motion reticle] loaded exposure-compensated " ..
+            "Widget3D material")
+    end
+    return exposure_compensated_widget_material
+end
+
 local function find_live_first_person_reticle()
     local target_class =
         api:find_uobject(
@@ -386,6 +474,8 @@ local function create_reticle()
             "DefaultSpriteMaterial.DefaultSpriteMaterial")
     local authored_reticle = find_live_first_person_reticle()
     local component_transform = new_identity_transform()
+    local exposure_material =
+        load_exposure_compensated_widget_material()
     if scene_class == nil or mesh_class == nil or
         point_light_class == nil or widget_component_class == nil or
         sphere == nil or authored_reticle == nil or
@@ -426,6 +516,15 @@ local function create_reticle()
         -- must be set before FinishAddComponent. The authored cyan reticle
         -- has translucent pixels that a default masked material can clip.
         world_reticle.BlendMode = 2
+        if world_reticle.SetTwoSided ~= nil then
+            world_reticle:SetTwoSided(false)
+        else
+            world_reticle.bIsTwoSided = false
+        end
+        if exposure_material ~= nil then
+            world_reticle.TranslucentMaterial_OneSided =
+                exposure_material
+        end
         if local_player ~= nil then
             if world_reticle.SetOwnerPlayer ~= nil then
                 world_reticle:SetOwnerPlayer(local_player)

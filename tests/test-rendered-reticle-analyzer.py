@@ -148,16 +148,35 @@ class RenderedReticleAnalyzerTests(unittest.TestCase):
         self.assertTrue(result["passed"], result["failures"])
         self.assertLess(result["stereo_correspondence_error_px"], 2.0)
 
-    def test_accepts_dark_annulus_as_geometry_only(self) -> None:
+    def test_rejects_dark_annulus_when_color_is_required(self) -> None:
         left, right = self.write_pair(color=(20, 20, 20))
         result = self.analyze(left, right)
-        self.assertTrue(result["passed"], result["failures"])
+        self.assertFalse(result["passed"])
         self.assertEqual(
             result["right_ring"]["detection_method"],
             "calibrated_dark_annulus_geometry_only",
         )
         self.assertFalse(result["right_ring"]["color_evaluable"])
         self.assertIsNone(result["right_ring"]["color_pass"])
+        self.assertTrue(
+            any("color was not verifiable" in item for item in result["failures"])
+        )
+
+    def test_can_report_dark_annulus_as_diagnostic_geometry(self) -> None:
+        left, right = self.write_pair(color=(20, 20, 20))
+        expected = (
+            RIGHT_CENTER[0] / (WIDTH - 1),
+            RIGHT_CENTER[1] / (HEIGHT - 1),
+        )
+        result = ANALYZER.analyze_pair(
+            left,
+            right,
+            expected_right_normalized=expected,
+            authored_path=self.authored,
+            require_color=False,
+        )
+        self.assertTrue(result["passed"], result["failures"])
+        self.assertFalse(result["require_reticle_color"])
 
     def test_rejects_missing_right_ring(self) -> None:
         left, right = self.write_pair(right_ring=False)

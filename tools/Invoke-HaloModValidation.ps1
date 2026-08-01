@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('Plan', 'Offline', 'LiveSmoke', 'Full', 'Soak')]
+    [ValidateSet('Plan', 'Offline', 'LiveSmoke', 'Extended', 'Full', 'Soak')]
     [string]$Suite = 'Offline',
 
     [string]$OutputDirectory = '',
@@ -23,6 +23,12 @@ param(
 
     [string]$ReticleImage = '',
 
+    [string]$ReticleSweepAuthoredReference = '',
+
+    [string]$HostileRedReticleImage = '',
+
+    [string]$RecoveredCyanReticleImage = '',
+
     [ValidateSet('cyan', 'red', 'any')]
     [string]$ReticleColor = 'any',
 
@@ -44,6 +50,11 @@ param(
     [ValidateRange(0.1, 100.0)]
     [double]$MaximumHandleGrowthPerMinute = 5.0,
 
+    [ValidateRange(0, [int]::MaxValue)]
+    [int]$ExpectedGamePid = 0,
+
+    [int]$OperatorPort = 8720,
+
     [switch]$SkipBuild
 )
 
@@ -60,23 +71,25 @@ if (-not $OutputDirectory) {
 }
 
 $inventory = @(
-    [pscustomobject]@{ Id='OFF-01'; Tier='Offline'; Test='Release build and CTest source/reticle gates'; Automation='automatic' },
+    [pscustomobject]@{ Id='OFF-01'; Tier='Offline'; Test='Release build and all harness self-tests'; Automation='automatic' },
     [pscustomobject]@{ Id='OFF-02'; Tier='Offline'; Test='Shipping Halo DLL hash and hook signatures'; Automation='automatic' },
     [pscustomobject]@{ Id='OFF-03'; Tier='Offline'; Test='Plugin status/diagnostic exports'; Automation='automatic' },
     [pscustomobject]@{ Id='OFF-04'; Tier='Offline'; Test='Profile configuration and camera presets'; Automation='automatic' },
     [pscustomobject]@{ Id='OFF-05'; Tier='Offline'; Test='Repository, package, and active-profile parity'; Automation='automatic' },
     [pscustomobject]@{ Id='OFF-06'; Tier='Offline'; Test='Package SHA256SUMS integrity'; Automation='automatic' },
-    [pscustomobject]@{ Id='OFF-07'; Tier='Offline'; Test='Reticle analyzer and optional raw image oracle'; Automation='automatic' },
+    [pscustomobject]@{ Id='OFF-07'; Tier='Offline'; Test='Reticle analyzer syntax and synthetic regression cases'; Automation='automatic' },
     [pscustomobject]@{ Id='LIVE-01'; Tier='Live'; Test='OpenXR, Operator, tracking, hooks, weapon readiness'; Automation='automatic' },
     [pscustomobject]@{ Id='LIVE-02'; Tier='Live'; Test='Gameplay and world-reticle ownership markers'; Automation='automatic' },
     [pscustomobject]@{ Id='POSE-01'; Tier='Live'; Test='25-case right grip/aim 6DOF numeric matrix'; Automation='automatic' },
     [pscustomobject]@{ Id='POSE-02'; Tier='Live'; Test='Visual-fire matrix and projectile convergence'; Automation='automatic' },
     [pscustomobject]@{ Id='RET-01'; Tier='Live'; Test='Raw 250x250 authored reticle shape/color'; Automation='automatic with -ReticleImage' },
     [pscustomobject]@{ Id='RET-02'; Tier='Live'; Test='Rendered stereo reticle oracle'; Automation='automatic capture and image oracle' },
-    [pscustomobject]@{ Id='HMD-01'; Tier='Extended'; Test='Head/controller independence matrix'; Automation='specified; diagnostics extension required' },
-    [pscustomobject]@{ Id='HAND-01'; Tier='Extended'; Test='Floating wrists, arm IK, tracking loss, extreme reach'; Automation='specified; diagnostics extension required' },
-    [pscustomobject]@{ Id='TWO-01'; Tier='Extended'; Test='Two-hand acquire/latch/release and shot basis'; Automation='bridge bit exposed; scripted matrix pending' },
-    [pscustomobject]@{ Id='INP-01'; Tier='Extended'; Test='Locomotion, deadzone, D-pad shift, button release'; Automation='specified; input diagnostics required' },
+    [pscustomobject]@{ Id='RET-03'; Tier='Live'; Test='Six-angle stereo reticle sweep with strict color'; Automation='automatic capture and image oracle' },
+    [pscustomobject]@{ Id='RET-04'; Tier='Live'; Test='Authored cyan, hostile red, cyan recovery sequence'; Automation='automatic with three raw captures' },
+    [pscustomobject]@{ Id='HMD-01'; Tier='Extended'; Test='Head/controller independence matrix'; Automation='automatic' },
+    [pscustomobject]@{ Id='HAND-01'; Tier='Extended'; Test='Floating wrists, arm IK, tracking loss, extreme reach'; Automation='automatic subset plus manual ABI gaps' },
+    [pscustomobject]@{ Id='TWO-01'; Tier='Extended'; Test='Two-hand acquire/latch/release and shot basis'; Automation='automatic subset plus manual ABI gaps' },
+    [pscustomobject]@{ Id='INP-01'; Tier='Extended'; Test='Locomotion, deadzone, D-pad shift, button release'; Automation='automatic subset plus manual ABI gaps' },
     [pscustomobject]@{ Id='WPN-01'; Tier='Extended'; Test='Weapon-family ballistic and zoom matrix'; Automation='semi-automatic' },
     [pscustomobject]@{ Id='LIFE-01'; Tier='Extended'; Test='Menu, death, reload, switch, zoom, hot-reload lifecycle'; Automation='semi-automatic' },
     [pscustomobject]@{ Id='PERF-01'; Tier='Soak'; Test='Frame progression, private bytes, handles'; Automation='automatic' },
@@ -337,7 +350,7 @@ function Invoke-OfflineTier {
     $profileLua = Join-Path $ProfileRoot 'scripts\halo_motion_reticle.lua'
 
     Invoke-ValidationCase OFF-01 Offline `
-        'Release build and CTest source/reticle gates' {
+        'Release build and all harness self-tests' {
         if (-not $SkipBuild) {
             if (-not (Test-Path -LiteralPath (
                 Join-Path $BuildDirectory 'CMakeCache.txt'))) {
@@ -424,6 +437,7 @@ function Invoke-OfflineTier {
             VR_AimUsePawnControlRotation = 'false'
             VR_DecoupledPitch = 'false'
             VR_DecoupledPitchUIAdjust = 'false'
+            UI_ExternalCompositorQuad = 'true'
             VR_SwapControllerInputs = 'false'
             VR_WorldScale = '1.000000'
         }
@@ -486,7 +500,7 @@ function Invoke-OfflineTier {
     }
 
     Invoke-ValidationCase OFF-07 Offline `
-        'Reticle analyzer syntax and optional raw image oracle' {
+        'Reticle analyzer syntax and synthetic regression cases' {
         $analyzer = Join-Path $repoRoot 'tests\analyze-reticle.py'
         $renderedAnalyzer = Join-Path $repoRoot `
             'tests\analyze-rendered-reticle.py'
@@ -496,17 +510,9 @@ function Invoke-OfflineTier {
             "ast.parse(pathlib.Path(r'$analyzer').read_text(encoding='utf-8')); " +
             "ast.parse(pathlib.Path(r'$renderedAnalyzer').read_text(encoding='utf-8'))") `
             '07-reticle-analyzer-syntax.log'
-        if ($ReticleImage) {
-            $json = Join-Path $OutputDirectory '07-reticle-image.json'
-            $analysis = Invoke-HeadlessProcess py @(
-                '-3', $analyzer, $ReticleImage,
-                '--color', $ReticleColor, '--json', $json) `
-                '07-reticle-image.log'
-            return "Raw reticle image passed. $($analysis.Stdout.Trim())"
-        }
         return (
-            'Analyzer parsed successfully. Pass -ReticleImage with a raw ' +
-            '250x250 render-target export to enforce shape and color.')
+            'Analyzer parsed and its synthetic good/bad reticle cases passed ' +
+            'under CTest. Live raw evidence is tracked separately as RET-01.')
     }
 }
 
@@ -571,6 +577,52 @@ function Invoke-LiveTier {
             throw "World-reticle widget is not production-ready: $($widget.Trim())"
         }
         "World-reticle marker is owned by the authored UMG replacement: $($widget.Trim())"
+    }
+
+    if ($ReticleImage) {
+        Invoke-ValidationCase RET-01 Live `
+            'Raw 250x250 authored reticle shape and color' {
+            $analyzer = Join-Path $repoRoot 'tests\analyze-reticle.py'
+            $json = Join-Path $OutputDirectory 'reticle-raw-analysis.json'
+            $analysis = Invoke-HeadlessProcess py @(
+                '-3', $analyzer, $ReticleImage,
+                '--color', $ReticleColor, '--json', $json) `
+                'reticle-raw-analysis.log'
+            "Raw authored reticle passed strict $ReticleColor validation. $json"
+        }
+    } else {
+        Add-SkippedCase RET-01 Live `
+            'Raw 250x250 authored reticle shape and color' `
+            'Pass -ReticleImage with a raw WidgetComponent render-target export.'
+    }
+
+    if ($ReticleImage -and $HostileRedReticleImage -and
+        $RecoveredCyanReticleImage) {
+        Invoke-ValidationCase RET-04 Live `
+            'Authored cyan, hostile red, cyan recovery sequence' {
+            $colorOutput = Join-Path $OutputDirectory 'reticle-color'
+            $arguments = @(
+                '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+                (Join-Path $repoRoot 'tools\Test-HaloReticleColorSequence.ps1'),
+                '-CyanImage', $ReticleImage,
+                '-HostileRedImage', $HostileRedReticleImage,
+                '-RecoveredCyanImage', $RecoveredCyanReticleImage,
+                '-OutputDirectory', $colorOutput)
+            $run = Invoke-HeadlessProcess pwsh $arguments `
+                'reticle-color-run.log'
+            $summaryPath = Join-Path $colorOutput `
+                'reticle-color-summary.json'
+            $colorSummary = Get-Content -LiteralPath $summaryPath -Raw |
+                ConvertFrom-Json
+            if (-not [bool]$colorSummary.passed) {
+                throw 'Reticle color transition reported a failure.'
+            }
+            "Cyan -> hostile red -> cyan passed with shape preservation. $summaryPath"
+        }
+    } else {
+        Add-SkippedCase RET-04 Live `
+            'Authored cyan, hostile red, cyan recovery sequence' `
+            'Pass -ReticleImage, -HostileRedReticleImage, and -RecoveredCyanReticleImage.'
     }
 
     Invoke-ValidationCase POSE-01 Live `
@@ -693,6 +745,44 @@ function Invoke-LiveTier {
                 "$([Math]::Round([double]$report.stereo_correspondence_error_px, 3))px; " +
                 "analysis=$json")
         }
+
+        Invoke-ValidationCase RET-03 Live `
+            'Six-angle stereo reticle sweep with strict color' {
+            $reticleOutput = Join-Path $OutputDirectory 'reticle-sweep'
+            $arguments = @(
+                '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+                (Join-Path $repoRoot 'tools\Invoke-HaloReticleSweep.ps1'),
+                '-OutputDirectory', $reticleOutput,
+                '-InvokeToolPath', $invokeTool,
+                '-HaloPid', $ExpectedGamePid,
+                '-OperatorPort', $OperatorPort)
+            $reference = if ($ReticleSweepAuthoredReference) {
+                $ReticleSweepAuthoredReference
+            } elseif ($ReticleImage) {
+                $ReticleImage
+            } else {
+                ''
+            }
+            if ($reference) {
+                $arguments += @('-AuthoredReference', $reference)
+            }
+            $run = Invoke-HeadlessProcess pwsh $arguments `
+                'reticle-sweep-run.log'
+            $summaryPath = Join-Path $reticleOutput `
+                'reticle-sweep-summary.json'
+            $reticleSummary = Get-Content -LiteralPath $summaryPath -Raw |
+                ConvertFrom-Json
+            if (-not [bool]$reticleSummary.passed -or
+                [int]$reticleSummary.failed_count -ne 0) {
+                throw (
+                    "Reticle sweep reported " +
+                    "$($reticleSummary.failed_count) failures.")
+            }
+            return (
+                "Passed $($reticleSummary.passed_count)/" +
+                "$($reticleSummary.case_count) reticle poses; " +
+                "montage=$reticleOutput\reticle-sweep-montage.png")
+        }
     } else {
         Add-SkippedCase POSE-02 Live `
             'Visual-fire matrix and projectile convergence' `
@@ -700,6 +790,79 @@ function Invoke-LiveTier {
         Add-SkippedCase RET-02 Live `
             'Rendered stereo reticle image oracle' `
             'LiveSmoke intentionally omits image capture.'
+        Add-SkippedCase RET-03 Live `
+            'Six-angle stereo reticle sweep with strict color' `
+            'LiveSmoke intentionally omits the multi-angle image sweep.'
+    }
+}
+
+function Invoke-ExtendedTier {
+    $extendedOutput = Join-Path $OutputDirectory 'extended'
+    $arguments = @(
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+        (Join-Path $repoRoot 'tools\Invoke-HaloExtendedValidation.ps1'),
+        '-ExpectedGamePid', $ExpectedGamePid,
+        '-OperatorPort', $OperatorPort,
+        '-OperatorPackageRoot', $OperatorPackageRoot,
+        '-OutputDirectory', $extendedOutput)
+    $run = Invoke-HeadlessProcess pwsh $arguments `
+        'extended-validation-run.log' -AllowFailure
+    $summaryPath = Join-Path $extendedOutput `
+        'extended-validation-summary.json'
+    $markdownPath = Join-Path $extendedOutput `
+        'extended-validation-summary.md'
+    if (-not (Test-Path -LiteralPath $summaryPath -PathType Leaf)) {
+        Add-Result -Id 'EXT-00' -Tier 'Extended' `
+            -Name 'Extended validation harness execution' -Status FAIL `
+            -DurationMilliseconds 0 `
+            -Details (
+                "Harness exited $($run.ExitCode) without a summary. " +
+                "See $($run.Log).") `
+            -Artifacts @($run.Log)
+        return
+    }
+
+    $extended = Get-Content -LiteralPath $summaryPath -Raw |
+        ConvertFrom-Json
+    foreach ($gate in $extended.gates) {
+        $classification = [string]$gate.classification
+        $status = switch ($classification) {
+            'passed' { 'PASS' }
+            'partial_pass_abi_gaps' { 'MANUAL' }
+            default { 'FAIL' }
+        }
+        $inventoryItem = $inventory |
+            Where-Object id -eq $gate.id |
+            Select-Object -First 1
+        $name = if ($inventoryItem) {
+            $inventoryItem.Test
+        } else {
+            "Extended gate $($gate.id)"
+        }
+        $details = (
+            "classification=$classification; " +
+            "passed_cases=$($gate.passed_cases); " +
+            "failed_cases=$($gate.failed_cases); summary=$summaryPath")
+        Add-Result -Id $gate.id -Tier Extended -Name $name `
+            -Status $status -DurationMilliseconds 0 -Details $details `
+            -Artifacts @($summaryPath, $markdownPath, $run.Log)
+        $color = switch ($status) {
+            'PASS' { 'Green' }
+            'MANUAL' { 'Yellow' }
+            default { 'Red' }
+        }
+        Write-Host "[$($gate.id)] ${status}: $details" -ForegroundColor $color
+    }
+
+    if ($run.ExitCode -ne 0 -and
+        @($extended.gates | Where-Object {
+            $_.classification -notin @('passed', 'partial_pass_abi_gaps')
+        }).Count -eq 0) {
+        Add-Result -Id 'EXT-00' -Tier Extended `
+            -Name 'Extended validation harness execution' -Status FAIL `
+            -DurationMilliseconds 0 `
+            -Details "Harness exited $($run.ExitCode). See $($run.Log)." `
+            -Artifacts @($run.Log, $summaryPath)
     }
 }
 
@@ -794,6 +957,9 @@ if ($Suite -in @('Offline', 'Full')) {
 if ($Suite -in @('LiveSmoke', 'Full')) {
     Invoke-LiveTier
 }
+if ($Suite -in @('Extended', 'Full')) {
+    Invoke-ExtendedTier
+}
 if ($Suite -eq 'Soak') {
     Invoke-SoakTier
 }
@@ -827,6 +993,7 @@ $markdown.Add("- Started: $($summary.started_utc)")
 $markdown.Add("- Passed: $($summary.passed)")
 $markdown.Add("- Failed: $($summary.failed)")
 $markdown.Add("- Skipped: $($summary.skipped)")
+$markdown.Add("- Manual follow-ups: $($summary.manual)")
 $markdown.Add('')
 $markdown.Add('| ID | Tier | Status | Test | Details |')
 $markdown.Add('|---|---|---:|---|---|')

@@ -59,4 +59,39 @@ if(BUILD_TESTING)
             -File "${CMAKE_CURRENT_SOURCE_DIR}/tools/Invoke-HaloModValidation.ps1"
             -Suite Plan
     )
+    add_test(
+        NAME HaloCEMotionControls.PoseMatrixHarness
+        COMMAND powershell
+            -NoProfile
+            -ExecutionPolicy Bypass
+            -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/validate-pose-matrix.ps1"
+    )
+    add_test(
+        NAME HaloCEMotionControls.ExtendedValidationHarness
+        COMMAND powershell
+            -NoProfile
+            -ExecutionPolicy Bypass
+            -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/validate-extended-validation.ps1"
+    )
+    add_test(
+        NAME HaloCEMotionControls.ReticleSweepHarness
+        COMMAND powershell
+            -NoProfile
+            -ExecutionPolicy Bypass
+            -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/validate-reticle-sweep.ps1"
+    )
+    add_test(
+        NAME HaloCEMotionControls.TopLevelValidationHarness
+        COMMAND powershell
+            -NoProfile
+            -ExecutionPolicy Bypass
+            -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/validate-mod-validation.ps1"
+    )
+    add_test(
+        NAME HaloCEMotionControls.ReticleColorSequenceHarness
+        COMMAND powershell
+            -NoProfile
+            -ExecutionPolicy Bypass
+            -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/validate-reticle-color-sequence.ps1"
+    )
 endif()

@@ -1,0 +1,135 @@
+{
+  "schema_version": 1,
+  "source_summary": "E:\\Github\\HaloCampaignEvolved-UEVR\\validation\\reticle-quad-fire-20260731\\pose-matrix-summary.json",
+  "all_cases_passed": true,
+  "machine_detected_reticle_count": 7,
+  "case_count": 7,
+  "cases": [
+    {
+      "case": "neutral",
+      "screenshot": "E:\\Github\\HaloCampaignEvolved-UEVR\\validation\\reticle-quad-fire-20260731\\01-VisualFire-neutral.png",
+      "expected_reticle_center": [
+        316.5,
+        447.5
+      ],
+      "measured_reticle_center": [
+        316.95,
+        447.125
+      ],
+      "detection_method": "strict_cyan_connected_component",
+      "weapon_controller_dot": 0.9999999999999992,
+      "muzzle_ray_miss_meters": 0.0,
+      "projectile_target_angle_degrees": 2.6675071730931244,
+      "marker_delta": 1,
+      "projectile_delta": 1
+    },
+    {
+      "case": "aim_yaw_pos",
+      "screenshot": "E:\\Github\\HaloCampaignEvolved-UEVR\\validation\\reticle-quad-fire-20260731\\02-VisualFire-aim_yaw_pos.png",
+      "expected_reticle_center": [
+        215.0,
+        447.5
+      ],
+      "measured_reticle_center": [
+        214.39772727272728,
+        447.5113636363636
+      ],
+      "detection_method": "strict_cyan_connected_component",
+      "weapon_controller_dot": 1.0,
+      "muzzle_ray_miss_meters": 1.422291505195827e-07,
+      "projectile_target_angle_degrees": 1.7744957315661412,
+      "marker_delta": 1,
+      "projectile_delta": 1
+    },
+    {
+      "case": "aim_yaw_neg",
+      "screenshot": "E:\\Github\\HaloCampaignEvolved-UEVR\\validation\\reticle-quad-fire-20260731\\03-VisualFire-aim_yaw_neg.png",
+      "expected_reticle_center": [
+        418.0,
+        447.5
+      ],
+      "measured_reticle_center": [
+        418.36046511627904,
+        447.54651162790697
+      ],
+      "detection_method": "strict_cyan_connected_component",
+      "weapon_controller_dot": 0.9999999999999956,
+      "muzzle_ray_miss_meters": 1.4222911499880596e-07,
+      "projectile_target_angle_degrees": 1.5417128833193332,
+      "marker_delta": 1,
+      "projectile_delta": 1
+    },
+    {
+      "case": "aim_pitch_pos",
+      "screenshot": "E:\\Github\\HaloCampaignEvolved-UEVR\\validation\\reticle-quad-fire-20260731\\04-VisualFire-aim_pitch_pos.png",
+      "expected_reticle_center": [
+        316.5,
+        346.0
+      ],
+      "measured_reticle_center": [
+        316.5,
+        347.5
+      ],
+      "detection_method": "hollow_contour_hdr_color_mask",
+      "weapon_controller_dot": 0.9999999999999999,
+      "muzzle_ray_miss_meters": 2.8445827041439315e-07,
+      "projectile_target_angle_degrees": 3.7150743213699715,
+      "marker_delta": 1,
+      "projectile_delta": 1
+    },
+    {
+      "case": "aim_pitch_neg",
+      "screenshot": "E:\\Github\\HaloCampaignEvolved-UEVR\\validation\\reticle-quad-fire-20260731\\05-VisualFire-aim_pitch_neg.png",
+      "expected_reticle_center": [
+        316.5,
+        549.0
+      ],
+      "measured_reticle_center": [
+        316.5507246376812,
+        548.0
+      ],
+      "detection_method": "strict_cyan_connected_component",
+      "weapon_controller_dot": 1.0000000000000002,
+      "muzzle_ray_miss_meters": 2.011424732180675e-07,
+      "projectile_target_angle_degrees": 1.477131763513773,
+      "marker_delta": 1,
+      "projectile_delta": 1
+    },
+    {
+      "case": "aim_roll_pos",
+      "screenshot": "E:\\Github\\HaloCampaignEvolved-UEVR\\validation\\reticle-quad-fire-20260731\\06-VisualFire-aim_roll_pos.png",
+      "expected_reticle_center": [
+        316.5,
+        447.5
+      ],
+      "measured_reticle_center": [
+        316.97435897435895,
+        447.2564102564103
+      ],
+      "detection_method": "strict_cyan_connected_component",
+      "weapon_controller_dot": 0.9999999999999999,
+      "muzzle_ray_miss_meters": 2.0114235544809415e-07,
+      "projectile_target_angle_degrees": 1.6645775123487843,
+      "marker_delta": 1,
+      "projectile_delta": 1
+    },
+    {
+      "case": "grip_translate_x_pos",
+      "screenshot": "E:\\Github\\HaloCampaignEvolved-UEVR\\validation\\reticle-quad-fire-20260731\\07-VisualFire-grip_translate_x_pos.png",
+      "expected_reticle_center": [
+        316.5,
+        447.5
+      ],
+      "measured_reticle_center": [
+        317.15384615384613,
+        447.2564102564103
+      ],
+      "detection_method": "strict_cyan_connected_component",
+      "weapon_controller_dot": 0.9999999999999989,
+      "muzzle_ray_miss_meters": 2.463480970701148e-07,
+      "projectile_target_angle_degrees": 2.5502024309197444,
+      "marker_delta": 1,
+      "projectile_delta": 1
+    }
+  ]
+}

@@ -18,12 +18,24 @@ $required = @(
     'Uninstall-HaloCEVR.ps1',
     'plugins\HaloCEMotionControls.dll',
     'scripts\halo_motion_reticle.lua',
+    'logicmods\HaloCEReticleColor.pak',
+    'logicmods\HaloCEReticleColor.utoc',
+    'logicmods\HaloCEReticleColor.ucas',
     'SHA256SUMS.txt'
 )
 foreach ($relativePath in $required) {
     $path = Join-Path $PSScriptRoot $relativePath
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
         throw "Required package file is missing: $relativePath"
+    }
+}
+
+foreach ($forbiddenGlobal in @('global.utoc', 'global.ucas')) {
+    $match = Get-ChildItem -LiteralPath $PSScriptRoot -Recurse -File |
+        Where-Object Name -EQ $forbiddenGlobal |
+        Select-Object -First 1
+    if ($match) {
+        throw "Package must not contain game-global IoStore payload: $($match.FullName)"
     }
 }
 

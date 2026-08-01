@@ -16,6 +16,7 @@ $validationWrapper = Join-Path $repoRoot 'tools\Invoke-HaloModValidation.ps1'
 $renderedAnalyzer = Join-Path $PSScriptRoot 'analyze-rendered-reticle.py'
 $renderedAnalyzerTests = Join-Path $PSScriptRoot `
     'test-rendered-reticle-analyzer.py'
+$rawAnalyzerTests = Join-Path $PSScriptRoot 'test-reticle-analyzer.py'
 
 function Require-Token {
     param(
@@ -49,12 +50,16 @@ function Reject-Token {
 
 foreach ($entry in @(
     @('bind_world_reticle_render_target', 'render-target binding helper'),
+    @('find_active_world_reticle_component', 'live WidgetComponent ownership selector'),
+    @('object->get_bool_property(L"bHiddenInGame")', 'stale hidden WidgetComponent rejection'),
     @('L"GetRenderTarget"', 'current WidgetComponent render target getter'),
     @('L"GetMaterialInstance"', 'current Widget3D material getter'),
     @('L"SetTextureParameterValue"', 'SlateUI texture setter'),
     @('L"K2_GetTextureParameterValue"', 'SlateUI binding verifier'),
     @('L"SlateUI"', 'Widget3D texture parameter'),
-    @('kWorldReticleEmissiveGain', 'world-reticle emissive compensation'),
+    @('kWorldReticleExposureCompensatedGain', 'exposure-compensated world-reticle gain'),
+    @('kWorldReticleFallbackEmissiveGain', 'stock-material fallback gain'),
+    @('WidgetVRPassThrough', 'EyeAdaptationInverse widget material detection'),
     @('L"SetTintColorAndOpacity"', 'Widget3D tint setter'),
     @('disable_world_reticle_depth_test', 'always-visible world-reticle depth override'),
     @('restore_world_reticle_depth_test', 'scoped depth-override restoration'),
@@ -124,7 +129,7 @@ if ($lua -match '(?m)^\s*reticle_light:SetVisibility\(true\)\s*$') {
 }
 
 foreach ($path in @($validationWrapper, $renderedAnalyzer,
-    $renderedAnalyzerTests)) {
+    $renderedAnalyzerTests, $rawAnalyzerTests)) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
         throw "Missing rendered-reticle validation file: $path"
     }
@@ -143,6 +148,10 @@ foreach ($entry in @(
 & py -3 $renderedAnalyzerTests
 if ($LASTEXITCODE -ne 0) {
     throw "Rendered-reticle analyzer tests failed with exit code $LASTEXITCODE."
+}
+& py -3 $rawAnalyzerTests
+if ($LASTEXITCODE -ne 0) {
+    throw "Raw-reticle analyzer tests failed with exit code $LASTEXITCODE."
 }
 
 Write-Output 'Halo world-reticle source validation passed.'

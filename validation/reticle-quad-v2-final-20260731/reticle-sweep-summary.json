@@ -1,0 +1,887 @@
+{
+  "schema_version": 1,
+  "started_utc": "2026-08-01T01:47:23.8029877Z",
+  "completed_utc": "2026-08-01T01:48:46.9400759Z",
+  "halo_pid": 42488,
+  "halo_pid_verified": true,
+  "operator_port": 8720,
+  "operator_port_owner": [
+    42488
+  ],
+  "invoke_tool_path": "E:\\Github\\UEVRMetaXROperator\\dist\\release\\UEVR-Meta-XR-Operator-205.1-nightly-01139-full-controls-v3-reticle-quad-v2\\Invoke-MetaXROperatorTool.ps1",
+  "output_directory": "E:\\Github\\HaloCampaignEvolved-UEVR\\validation\\reticle-quad-v2-final-20260731",
+  "calibration": {
+    "source": "Prior source-preserving 840x880 neutral/yaw +/-15/pitch +/-15 composited captures under final-visible-fire-20260731",
+    "reference_resolution": [
+      840,
+      880
+    ],
+    "neutral_right_point": [
+      316.5,
+      447.5
+    ],
+    "horizontal_focal_pixels": 379.6,
+    "vertical_focal_pixels": 376.9,
+    "projection": "x=cx-fx*tan(yaw); y=cy-fy*tan(pitch)",
+    "maximum_projection_error_pixels": 6.0,
+    "maximum_stereo_error_pixels": 6.0
+  },
+  "authored_reference": null,
+  "source_preservation": {
+    "source_images_untouched": true,
+    "montage_uses_annotated_copies": true,
+    "per_image_sha256": true
+  },
+  "session_constraints": {
+    "relaunched": false,
+    "foreground_activation_used": false,
+    "shots_fired": 0,
+    "composited_eye_capture": true
+  },
+  "restored_pose": {
+    "grip_position": [
+      0.3,
+      -0.33,
+      -0.46
+    ],
+    "aim_position": [
+      0.3,
+      -0.3,
+      -0.555
+    ],
+    "grip_orientation": [
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ],
+    "aim_orientation": [
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ]
+  },
+  "case_count": 6,
+  "passed_count": 6,
+  "failed_count": 0,
+  "passed": true,
+  "cases": [
+    {
+      "name": "neutral",
+      "yaw_degrees": 0.0,
+      "pitch_degrees": 0.0,
+      "roll_degrees": 0.0,
+      "commanded_orientation": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "expected_right_point_reference_pixels": [
+        316.5,
+        447.5
+      ],
+      "expected_right_point_normalized": [
+        0.3772348033373063,
+        0.5091012514220705
+      ],
+      "pose_sequence": 3211,
+      "pose_position_error_meters": 4.9668947815170915E-08,
+      "pose_angle_error_degrees": 0.0,
+      "pose_wait_milliseconds": 1888.7945,
+      "left_image": "E:\\Github\\HaloCampaignEvolved-UEVR\\validation\\reticle-quad-v2-final-20260731\\neutral-left.png",
+      "right_image": "E:\\Github\\HaloCampaignEvolved-UEVR\\validation\\reticle-quad-v2-final-20260731\\neutral-right.png",
+      "left_image_sha256": "88ebbb4bdc992f1fb0b47092dbd9b061a1a20abdc151dd543ba22b84c4f9ce6c",
+      "right_image_sha256": "3b6b4ddf9c5d338d53c93590c5dd5a329e51329ce449e7b4c61c067a972bdf32",
+      "analysis_file": "E:\\Github\\HaloCampaignEvolved-UEVR\\validation\\reticle-quad-v2-final-20260731\\neutral-analysis.json",
+      "analyzer_exit_code": 0,
+      "passed": true,
+      "analysis": {
+        "schema_version": 1,
+        "passed": true,
+        "failures": [],
+        "left_image": "E:\\Github\\HaloCampaignEvolved-UEVR\\validation\\reticle-quad-v2-final-20260731\\neutral-left.png",
+        "right_image": "E:\\Github\\HaloCampaignEvolved-UEVR\\validation\\reticle-quad-v2-final-20260731\\neutral-right.png",
+        "resolution": [
+          840,
+          880
+        ],
+        "expected_right_point": [
+          316.4999999999998,
+          447.5000000000004
+        ],
+        "search_radius_px": 33.6,
+        "maximum_projection_error_px": 6.0,
+        "require_reticle_color": true,
+        "authored_reference": null,
+        "eye_background_shift_left_to_right": [
+          -204.69169088106275,
+          -0.08743092774250272
+        ],
+        "eye_background_phase_response": 0.35055576489295487,
+        "expected_left_point": [
+          521.1916908810625,
+          447.5874309277429
+        ],
+        "stereo_correspondence_error_px": 1.2870296082323192,
+        "right_candidate_count": 1,
+        "left_candidate_count": 1,
+        "right_ring": {
+          "detection_method": "strict_cyan_connected_component",
+          "centroid": [
+            317.07894736842104,
+            447.2105263157895
+          ],
+          "bbox": [
+            312,
+            443,
+            322,
+            452
+          ],
+          "dimensions": [
+            11,
+            10
+          ],
+          "area_px": 38,
+          "hole_count": 1,
+          "inner_disc_occupancy": 0.0,
+          "annular_occupancy": 0.42696629213483145,
+          "circularity": 0.8505718625040087,
+          "expected_point_error_px": 0.6472828355924123,
+          "median_bgr": [
+            210.5,
+            191.0,
+            89.5
+          ],
+          "median_hsv": [
+            95.0,
+            143.5,
+            210.5
+          ],
+          "center_annulus_contrast": 16.52631578947367,
+          "score": 4.039125660553283,
+          "color_evaluable": true,
+          "color_pass": true
+        },
+        "left_ring": {
+          "detection_method": "strict_cyan_connected_component",
+          "centroid": [
+            523.0526315789474,
+            447.1842105263158
+          ],
+          "bbox": [
+            518,
+            443,
+            528,
+            452
+          ],
+          "dimensions": [
+            11,
+            10
+          ],
+          "area_px": 38,
+          "hole_count": 1,
+          "inner_disc_occupancy": 0.0,
+          "annular_occupancy": 0.4222222222222222,
+          "circularity": 0.8505718625040087,
+          "expected_point_error_px": 1.9041236759126963,
+          "median_bgr": [
+            209.5,
+            190.0,
+            86.0
+          ],
+          "median_hsv": [
+            95.0,
+            145.5,
+            209.5
+          ],
+          "center_annulus_contrast": 20.323308270676677,
+          "score": 4.082381717134961,
+          "color_evaluable": true,
+          "color_pass": true
+        }
+      }
+    },
+    {
+      "name": "yaw_left_15",
+      "yaw_degrees": 15.0,
+      "pitch_degrees": 0.0,
+      "roll_degrees": 0.0,
+      "commanded_orientation": [
+        0.0,
+        0.13052619222005157,
+        0.0,
+        0.9914448613738104
+      ],
+      "expected_right_point_reference_pixels": [
+        214.78648655314583,
+        447.5
+      ],
+      "expected_right_point_normalized": [
+        0.2560029637105433,
+        0.5091012514220705
+      ],
+      "pose_sequence": 3974,
+      "pose_position_error_meters": 4.9668947815170915E-08,
+      "pose_angle_error_degrees": 0.0,
+      "pose_wait_milliseconds": 1882.884,
+      "left_image": "E:\\Github\\HaloCampaignEvolved-UEVR\\validation\\reticle-quad-v2-final-20260731\\yaw_left_15-left.png",
+      "right_image": "E:\\Github\\HaloCampaignEvolved-UEVR\\validation\\reticle-quad-v2-final-20260731\\yaw_left_15-right.png",
+      "left_image_sha256": "282b6981ddf89e05972ecd00148e666f53118fdd9039d40ad06e5df7646e0ff7",
+      "right_image_sha256": "027517cffddc8a72a212a32cb42ffe2358740f183f727fe7599d354cb1700160",
+      "analysis_file": "E:\\Github\\HaloCampaignEvolved-UEVR\\validation\\reticle-quad-v2-final-20260731\\yaw_left_15-analysis.json",
+      "analyzer_exit_code": 0,
+      "passed": true,
+      "analysis": {
+        "schema_version": 1,
+        "passed": true,
+        "failures": [],
+        "left_image": "E:\\Github\\HaloCampaignEvolved-UEVR\\validation\\reticle-quad-v2-final-20260731\\yaw_left_15-left.png",
+        "right_image": "E:\\Github\\HaloCampaignEvolved-UEVR\\validation\\reticle-quad-v2-final-20260731\\yaw_left_15-right.png",
+        "resolution": [
+          840,
+          880
+        ],
+        "expected_right_point": [
+          214.78648655314555,
+          447.5000000000004
+        ],
+        "search_radius_px": 33.6,
+        "maximum_projection_error_px": 6.0,
+        "require_reticle_color": true,
+        "authored_reference": null,
+        "eye_background_shift_left_to_right": [
+          -204.59993029924465,
+          -0.0733567751636599
+        ],
+        "eye_background_phase_response": 0.35323027838404775,
+        "expected_left_point": [
+          419.3864168523902,
+          447.57335677516403
+        ],
+        "stereo_correspondence_error_px": 1.5759012728884056,
+        "right_candidate_count": 1,
+        "left_candidate_count": 1,
+        "right_ring": {
+          "detection_method": "strict_cyan_connected_component",
+          "centroid": [
+            214.58333333333334,
+            447.3452380952381
+          ],
+          "bbox": [
+            209,
+            442,
+            220,
+            453
+          ],
+          "dimensions": [
+            12,
+            12
+          ],
+          "area_px": 84,
+          "hole_count": 1,
+          "inner_disc_occupancy": 0.0,
+          "annular_occupancy": 0.6890756302521008,
+          "circularity": 0.9042930140101516,
+          "expected_point_error_px": 0.2553869180003745,
+          "median_bgr": [
+            154.0,
+            140.0,
+            57.5
+          ],
+          "median_hsv": [
+            94.0,
+            160.0,
+            154.0
+          ],
+          "center_annulus_contrast": 108.34103641456583,
+          "score": 4.567829952462215,
+          "color_evaluable": true,
+          "color_pass": true
+        },
+        "left_ring": {
+          "detection_method": "strict_cyan_connected_component",
+          "centroid": [
+            420.75824175824175,
+            447.4725274725275
+          ],
+          "bbox": [
+            414,
+            442,
+            427,
+            453
+          ],
+          "dimensions": [
+            14,
+            12
+          ],
+          "area_px": 91,
+          "hole_count": 1,
+          "inner_disc_occupancy": 0.0,
+          "annular_occupancy": 0.6515151515151515,
+          "circularity": 0.8568198670000247,
+          "expected_point_error_px": 1.3755253980151725,
+          "median_bgr": [
+            150.0,
+            137.0,
+            56.0
+          ],
+          "median_hsv": [
+            94.0,
+            161.0,
+            150.0
+          ],
+          "center_annulus_contrast": 101.74725274725274,
+          "score": 4.370782478713659,
+          "color_evaluable": true,
+          "color_pass": true
+        }
+      }
+    },
+    {
+      "name": "yaw_right_15",
+      "yaw_degrees": -15.0,
+      "pitch_degrees": 0.0,
+      "roll_degrees": 0.0,
+      "commanded_orientation": [
+        0.0,
+        -0.13052619222005157,
+        0.0,
+        0.9914448613738104
+      ],
+      "expected_right_point_reference_pixels": [
+        418.21351344685417,
+        447.5
+      ],
+      "expected_right_point_normalized": [
+        0.49846664296406934,
+        0.5091012514220705
+      ],
+      "pose_sequence": 4725,
+      "pose_position_error_meters": 4.9668947815170915E-08,
+      "pose_angle_error_degrees": 0.0,
+      "pose_wait_milliseconds": 1865.9984,
+      "left_image": "E:\\Github\\HaloCampaignEvolved-UEVR\\validation\\reticle-quad-v2-final-20260731\\yaw_right_15-left.png",
+      "right_image": "E:\\Github\\HaloCampaignEvolved-UEVR\\validation\\reticle-quad-v2-final-20260731\\yaw_right_15-right.png",
+      "left_image_sha256": "e2d81bc2af8f982fe8254ac0dedc1d83a03fda030f361d638a5ff07a9dbde64e",
+      "right_image_sha256": "baedf52c2e591cf14d2fe764275820d6fc026d42cb09e12f4e8e5a4c179df981",
+      "analysis_file": "E:\\Github\\HaloCampaignEvolved-UEVR\\validation\\reticle-quad-v2-final-20260731\\yaw_right_15-analysis.json",
+      "analyzer_exit_code": 0,
+      "passed": true,
+      "analysis": {
+        "schema_version": 1,
+        "passed": true,
+        "failures": [],
+        "left_image": "E:\\Github\\HaloCampaignEvolved-UEVR\\validation\\reticle-quad-v2-final-20260731\\yaw_right_15-left.png",
+        "right_image": "E:\\Github\\HaloCampaignEvolved-UEVR\\validation\\reticle-quad-v2-final-20260731\\yaw_right_15-right.png",
+        "resolution": [
+          840,
+          880
+        ],
+        "expected_right_point": [
+          418.2135134468539,
+          447.5000000000004
+        ],
+        "search_radius_px": 33.6,
+        "maximum_projection_error_px": 6.0,
+        "require_reticle_color": true,
+        "authored_reference": null,
+        "eye_background_shift_left_to_right": [
+          -204.63210761528933,
+          0.002418396004685519
+        ],
+        "eye_background_phase_response": 0.3318305625837036,
+        "expected_left_point": [
+          622.8456210621432,
+          447.49758160399574
+        ],
+        "stereo_correspondence_error_px": 1.5214885765541537,
+        "right_candidate_count": 1,
+        "left_candidate_count": 1,
+        "right_ring": {
+          "detection_method": "strict_cyan_connected_component",
+          "centroid": [
+            418.3529411764706,
+            447.47058823529414
+          ],
+          "bbox": [
+            412,
+            442,
+            424,
+            453
+          ],
+          "dimensions": [
+            13,
+            12
+          ],
+          "area_px": 85,
+          "hole_count": 1,
+          "inner_disc_occupancy": 0.0,
+          "annular_occupancy": 0.6587301587301587,
+          "circularity": 0.8742098813216729,
+          "expected_point_error_px": 0.14249611815488616,
+          "median_bgr": [
+            162.0,
+            145.0,
+            66.0
+          ],
+          "median_hsv": [
+            95.0,
+            155.0,
+            162.0
+          ],
+          "center_annulus_contrast": 83.16408668730651,
+          "score": 4.518690428236343,
+          "color_evaluable": true,
+          "color_pass": true
+        },
+        "left_ring": {
+          "detection_method": "strict_cyan_connected_component",
+          "centroid": [
+            624.5058823529412,
+            447.4235294117647
+          ],
+          "bbox": [
+            619,
+            442,
+            630,
+            453
+          ],
+          "dimensions": [
+            12,
+            12
+          ],
+          "area_px": 85,
+          "hole_count": 1,
+          "inner_disc_occupancy": 0.0,
+          "annular_occupancy": 0.6949152542372882,
+          "circularity": 0.8439888189105291,
+          "expected_point_error_px": 1.6619119353612979,
+          "median_bgr": [
+            156.0,
+            139.0,
+            62.0
+          ],
+          "median_hsv": [
+            95.0,
+            156.0,
+            156.0
+          ],
+          "center_annulus_contrast": 84.05735294117648,
+          "score": 4.372712879611687,
+          "color_evaluable": true,
+          "color_pass": true
+        }
+      }
+    },
+    {
+      "name": "pitch_up_12",
+      "yaw_degrees": 0.0,
+      "pitch_degrees": 12.0,
+      "roll_degrees": 0.0,
+      "commanded_orientation": [
+        0.10452846326765347,
+        0.0,
+        0.0,
+        0.9945218953682734
+      ],
+      "expected_right_point_reference_pixels": [
+        316.5,
+        367.3874319065687
+      ],
+      "expected_right_point_normalized": [
+        0.3772348033373063,
+        0.4179606733863125
+      ],
+      "pose_sequence": 5482,
+      "pose_position_error_meters": 4.9668947815170915E-08,
+      "pose_angle_error_degrees": 0.0,
+      "pose_wait_milliseconds": 1952.6926,
+      "left_image": "E:\\Github\\HaloCampaignEvolved-UEVR\\validation\\reticle-quad-v2-final-20260731\\pitch_up_12-left.png",
+      "right_image": "E:\\Github\\HaloCampaignEvolved-UEVR\\validation\\reticle-quad-v2-final-20260731\\pitch_up_12-right.png",
+      "left_image_sha256": "37da5b3177845c56ebc6795da1e0c71bc7f0e12e045f7e9140e9d86422cecbbf",
+      "right_image_sha256": "95876b83931e8726b5fa77abeeab0def53e1ed8a9b2d44659374ea98c76467c1",
+      "analysis_file": "E:\\Github\\HaloCampaignEvolved-UEVR\\validation\\reticle-quad-v2-final-20260731\\pitch_up_12-analysis.json",
+      "analyzer_exit_code": 0,
+      "passed": true,
+      "analysis": {
+        "schema_version": 1,
+        "passed": true,
+        "failures": [],
+        "left_image": "E:\\Github\\HaloCampaignEvolved-UEVR\\validation\\reticle-quad-v2-final-20260731\\pitch_up_12-left.png",
+        "right_image": "E:\\Github\\HaloCampaignEvolved-UEVR\\validation\\reticle-quad-v2-final-20260731\\pitch_up_12-right.png",
+        "resolution": [
+          840,
+          880
+        ],
+        "expected_right_point": [
+          316.4999999999998,
+          367.3874319065682
+        ],
+        "search_radius_px": 33.6,
+        "maximum_projection_error_px": 6.0,
+        "require_reticle_color": true,
+        "authored_reference": null,
+        "eye_background_shift_left_to_right": [
+          -204.63742504522259,
+          -0.06318310849684394
+        ],
+        "eye_background_phase_response": 0.33835064035384255,
+        "expected_left_point": [
+          521.1374250452224,
+          367.45061501506507
+        ],
+        "stereo_correspondence_error_px": 1.3802300324653571,
+        "right_candidate_count": 1,
+        "left_candidate_count": 1,
+        "right_ring": {
+          "detection_method": "strict_cyan_connected_component",
+          "centroid": [
+            316.43859649122805,
+            367.35087719298247
+          ],
+          "bbox": [
+            311,
+            362,
+            322,
+            373
+          ],
+          "dimensions": [
+            12,
+            12
+          ],
+          "area_px": 57,
+          "hole_count": 1,
+          "inner_disc_occupancy": 0.0,
+          "annular_occupancy": 0.4789915966386555,
+          "circularity": 0.8698568247619927,
+          "expected_point_error_px": 0.0714607442923408,
+          "median_bgr": [
+            197.0,
+            177.0,
+            85.0
+          ],
+          "median_hsv": [
+            95.0,
+            144.0,
+            197.0
+          ],
+          "center_annulus_contrast": 42.160990712074295,
+          "score": 4.341702346971414,
+          "color_evaluable": true,
+          "color_pass": true
+        },
+        "left_ring": {
+          "detection_method": "strict_cyan_connected_component",
+          "centroid": [
+            522.4545454545455,
+            367.3454545454546
+          ],
+          "bbox": [
+            517,
+            362,
+            528,
+            373
+          ],
+          "dimensions": [
+            12,
+            12
+          ],
+          "area_px": 55,
+          "hole_count": 1,
+          "inner_disc_occupancy": 0.0,
+          "annular_occupancy": 0.46218487394957986,
+          "circularity": 0.8259550505662386,
+          "expected_point_error_px": 1.3213118091594622,
+          "median_bgr": [
+            203.0,
+            183.0,
+            84.0
+          ],
+          "median_hsv": [
+            95.0,
+            149.0,
+            203.0
+          ],
+          "center_annulus_contrast": 48.968983957219265,
+          "score": 4.156008743599872,
+          "color_evaluable": true,
+          "color_pass": true
+        }
+      }
+    },
+    {
+      "name": "pitch_down_12",
+      "yaw_degrees": 0.0,
+      "pitch_degrees": -12.0,
+      "roll_degrees": 0.0,
+      "commanded_orientation": [
+        -0.10452846326765347,
+        0.0,
+        0.0,
+        0.9945218953682734
+      ],
+      "expected_right_point_reference_pixels": [
+        316.5,
+        527.6125680934313
+      ],
+      "expected_right_point_normalized": [
+        0.3772348033373063,
+        0.6002418294578286
+      ],
+      "pose_sequence": 6238,
+      "pose_position_error_meters": 4.9668947815170915E-08,
+      "pose_angle_error_degrees": 0.0,
+      "pose_wait_milliseconds": 1821.5709,
+      "left_image": "E:\\Github\\HaloCampaignEvolved-UEVR\\validation\\reticle-quad-v2-final-20260731\\pitch_down_12-left.png",
+      "right_image": "E:\\Github\\HaloCampaignEvolved-UEVR\\validation\\reticle-quad-v2-final-20260731\\pitch_down_12-right.png",
+      "left_image_sha256": "7313ebfd3137322db76b73e2b5d5d083ebe3d3bffa3daa96f0464515f1c3177d",
+      "right_image_sha256": "df73fcc71229abb66dcdf82d574f483955847a39fb588ed3ab1da02141a96d53",
+      "analysis_file": "E:\\Github\\HaloCampaignEvolved-UEVR\\validation\\reticle-quad-v2-final-20260731\\pitch_down_12-analysis.json",
+      "analyzer_exit_code": 0,
+      "passed": true,
+      "analysis": {
+        "schema_version": 1,
+        "passed": true,
+        "failures": [],
+        "left_image": "E:\\Github\\HaloCampaignEvolved-UEVR\\validation\\reticle-quad-v2-final-20260731\\pitch_down_12-left.png",
+        "right_image": "E:\\Github\\HaloCampaignEvolved-UEVR\\validation\\reticle-quad-v2-final-20260731\\pitch_down_12-right.png",
+        "resolution": [
+          840,
+          880
+        ],
+        "expected_right_point": [
+          316.4999999999998,
+          527.6125680934317
+        ],
+        "search_radius_px": 33.6,
+        "maximum_projection_error_px": 6.0,
+        "require_reticle_color": true,
+        "authored_reference": null,
+        "eye_background_shift_left_to_right": [
+          -204.6754896946394,
+          -0.06843473051642945
+        ],
+        "eye_background_phase_response": 0.3390880785851812,
+        "expected_left_point": [
+          521.1754896946392,
+          527.6810028239481
+        ],
+        "stereo_correspondence_error_px": 1.3623317249816673,
+        "right_candidate_count": 1,
+        "left_candidate_count": 1,
+        "right_ring": {
+          "detection_method": "strict_cyan_connected_component",
+          "centroid": [
+            316.5774647887324,
+            527.0140845070423
+          ],
+          "bbox": [
+            311,
+            522,
+            322,
+            532
+          ],
+          "dimensions": [
+            12,
+            11
+          ],
+          "area_px": 71,
+          "hole_count": 1,
+          "inner_disc_occupancy": 0.0,
+          "annular_occupancy": 0.6826923076923077,
+          "circularity": 0.9094873130415619,
+          "expected_point_error_px": 0.6034760945314533,
+          "median_bgr": [
+            171.0,
+            153.0,
+            69.0
+          ],
+          "median_hsv": [
+            95.0,
+            153.0,
+            171.0
+          ],
+          "center_annulus_contrast": 88.9330985915493,
+          "score": 4.531832011280724,
+          "color_evaluable": true,
+          "color_pass": true
+        },
+        "left_ring": {
+          "detection_method": "strict_cyan_connected_component",
+          "centroid": [
+            522.6060606060606,
+            526.9242424242424
+          ],
+          "bbox": [
+            517,
+            522,
+            528,
+            532
+          ],
+          "dimensions": [
+            12,
+            11
+          ],
+          "area_px": 66,
+          "hole_count": 1,
+          "inner_disc_occupancy": 0.0,
+          "annular_occupancy": 0.6226415094339622,
+          "circularity": 0.9145230134502668,
+          "expected_point_error_px": 1.6184002703806017,
+          "median_bgr": [
+            178.5,
+            160.5,
+            78.5
+          ],
+          "median_hsv": [
+            95.0,
+            149.0,
+            178.5
+          ],
+          "center_annulus_contrast": 70.44318181818181,
+          "score": 4.375324495846169,
+          "color_evaluable": true,
+          "color_pass": true
+        }
+      }
+    },
+    {
+      "name": "diagonal_up_right_roll",
+      "yaw_degrees": -10.0,
+      "pitch_degrees": 10.0,
+      "roll_degrees": 15.0,
+      "commanded_orientation": [
+        0.07474847900899456,
+        -0.09741411442580997,
+        0.1370658367491441,
+        0.9829222306941349
+      ],
+      "expected_right_point_reference_pixels": [
+        383.4337218769333,
+        381.04236097097953
+      ],
+      "expected_right_point_normalized": [
+        0.45701277935272144,
+        0.4334952912070302
+      ],
+      "pose_sequence": 6985,
+      "pose_position_error_meters": 4.9668947815170915E-08,
+      "pose_angle_error_degrees": 0.0,
+      "pose_wait_milliseconds": 1866.8836,
+      "left_image": "E:\\Github\\HaloCampaignEvolved-UEVR\\validation\\reticle-quad-v2-final-20260731\\diagonal_up_right_roll-left.png",
+      "right_image": "E:\\Github\\HaloCampaignEvolved-UEVR\\validation\\reticle-quad-v2-final-20260731\\diagonal_up_right_roll-right.png",
+      "left_image_sha256": "24f347b2f5da2f0235ef9667b44eaaa8d47ab7d0902866bbd65059cc7f79f91f",
+      "right_image_sha256": "dfc5de07defa03083e2253d95fb20c4b42d17be4669f2fba25eb2434f31a5dcb",
+      "analysis_file": "E:\\Github\\HaloCampaignEvolved-UEVR\\validation\\reticle-quad-v2-final-20260731\\diagonal_up_right_roll-analysis.json",
+      "analyzer_exit_code": 0,
+      "passed": true,
+      "analysis": {
+        "schema_version": 1,
+        "passed": true,
+        "failures": [],
+        "left_image": "E:\\Github\\HaloCampaignEvolved-UEVR\\validation\\reticle-quad-v2-final-20260731\\diagonal_up_right_roll-left.png",
+        "right_image": "E:\\Github\\HaloCampaignEvolved-UEVR\\validation\\reticle-quad-v2-final-20260731\\diagonal_up_right_roll-right.png",
+        "resolution": [
+          840,
+          880
+        ],
+        "expected_right_point": [
+          383.4337218769329,
+          381.04236097097936
+        ],
+        "search_radius_px": 33.6,
+        "maximum_projection_error_px": 6.0,
+        "require_reticle_color": true,
+        "authored_reference": null,
+        "eye_background_shift_left_to_right": [
+          -204.6519401674209,
+          -0.05948942087044884
+        ],
+        "eye_background_phase_response": 0.346526927418179,
+        "expected_left_point": [
+          588.0856620443537,
+          381.1018503918498
+        ],
+        "stereo_correspondence_error_px": 1.3888766593361392,
+        "right_candidate_count": 1,
+        "left_candidate_count": 1,
+        "right_ring": {
+          "detection_method": "strict_cyan_connected_component",
+          "centroid": [
+            383.3968253968254,
+            379.92063492063494
+          ],
+          "bbox": [
+            378,
+            375,
+            389,
+            385
+          ],
+          "dimensions": [
+            12,
+            11
+          ],
+          "area_px": 63,
+          "hole_count": 1,
+          "inner_disc_occupancy": 0.0,
+          "annular_occupancy": 0.6,
+          "circularity": 0.9145230196852047,
+          "expected_point_error_px": 1.1223326967818483,
+          "median_bgr": [
+            185.0,
+            166.0,
+            83.0
+          ],
+          "median_hsv": [
+            96.0,
+            142.0,
+            185.0
+          ],
+          "center_annulus_contrast": 54.75396825396825,
+          "score": 4.40228975000702,
+          "color_evaluable": true,
+          "color_pass": true
+        },
+        "left_ring": {
+          "detection_method": "strict_cyan_connected_component",
+          "centroid": [
+            589.4375,
+            380.0
+          ],
+          "bbox": [
+            584,
+            375,
+            595,
+            385
+          ],
+          "dimensions": [
+            12,
+            11
+          ],
+          "area_px": 64,
+          "hole_count": 1,
+          "inner_disc_occupancy": 0.0,
+          "annular_occupancy": 0.6153846153846154,
+          "circularity": 0.9247985592322294,
+          "expected_point_error_px": 1.7440011881720077,
+          "median_bgr": [
+            184.0,
+            163.0,
+            82.0
+          ],
+          "median_hsv": [
+            96.0,
+            144.5,
+            184.0
+          ],
+          "center_annulus_contrast": 60.3125,
+          "score": 4.365783055799644,
+          "color_evaluable": true,
+          "color_pass": true
+        }
+      }
+    }
+  ]
+}

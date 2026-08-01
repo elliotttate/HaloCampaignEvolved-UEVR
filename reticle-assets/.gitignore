@@ -1,0 +1,7 @@
+# Unreal-generated build products. The small redistributable LogicMod payload
+# is checked in separately under ../logicmods/.
+/Build/
+/DerivedDataCache/
+/Intermediate/
+/Packaged/
+/Saved/

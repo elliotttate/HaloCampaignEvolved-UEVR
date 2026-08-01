@@ -1,35 +1,28 @@
 [CmdletBinding()]
 param(
-    [string]$OutputDirectory = (
-        Join-Path $PSScriptRoot `
-            '..\diagnostics\validation\final-reticle-sweep-20260731'),
+    [string]$OutputDirectory = '',
 
     [string]$InvokeToolPath = (
         'E:\Github\UEVRMetaXROperator\dist\release\' +
         'UEVR-Meta-XR-Operator-205.1-nightly-01139-full-controls-v3\' +
         'Invoke-MetaXROperatorTool.ps1'),
 
-    [string]$AuthoredReference = (
-        Join-Path $PSScriptRoot `
-            ('..\diagnostics\validation\final-depth-reticle-20260731\' +
-             'reticle-authored-final.exr')),
+    [string]$AuthoredReference = '',
 
-    [int]$HaloPid = 11856
+    [ValidateRange(0, [int]::MaxValue)]
+    [int]$HaloPid = 0,
+
+    [int]$OperatorPort = 8720,
+
+    [switch]$PlanOnly
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-$OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
-$InvokeToolPath = (Resolve-Path -LiteralPath $InvokeToolPath).Path
-$AuthoredReference = (Resolve-Path -LiteralPath $AuthoredReference).Path
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $analyzer = Join-Path $repoRoot 'tests\analyze-rendered-reticle.py'
 $montageBuilder = Join-Path $repoRoot 'tools\Build-HaloReticleSweepMontage.py'
-New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
-Copy-Item -LiteralPath $AuthoredReference `
-    -Destination (Join-Path $OutputDirectory 'authored-reference.exr') `
-    -Force
 
 $neutralGripPosition = @(0.30, -0.33, -0.46)
 $neutralAimPosition = @(0.30, -0.30, -0.555)
@@ -201,9 +194,47 @@ foreach ($case in $cases) {
         New-CombinedQuaternion $case.Yaw $case.Pitch $case.Roll)
 }
 
+if ($PlanOnly) {
+    $cases | Select-Object Name, Yaw, Pitch, Roll, Orientation |
+        Format-Table -AutoSize
+    return
+}
+
+if (-not $OutputDirectory) {
+    $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+    $OutputDirectory = Join-Path $repoRoot (
+        "diagnostics\validation\reticle-sweep-$stamp")
+}
+$OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
+$InvokeToolPath = (Resolve-Path -LiteralPath $InvokeToolPath).Path
+New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
+$authoredCopy = $null
+if ($AuthoredReference) {
+    $AuthoredReference = (Resolve-Path -LiteralPath $AuthoredReference).Path
+    $authoredCopy = Join-Path $OutputDirectory 'authored-reference.exr'
+    Copy-Item -LiteralPath $AuthoredReference `
+        -Destination $authoredCopy `
+        -Force
+}
+
 $startedUtc = [DateTime]::UtcNow
 $results = [Collections.Generic.List[object]]::new()
+$owners = @()
 try {
+    $listeners = @(Get-NetTCPConnection -State Listen -LocalPort $OperatorPort)
+    $owners = @($listeners | Select-Object -ExpandProperty OwningProcess -Unique)
+    if ($owners.Count -ne 1) {
+        throw (
+            "Operator port $OperatorPort does not have exactly one owner; " +
+            "observed owners: $($owners -join ',').")
+    }
+    if ($HaloPid -eq 0) {
+        $HaloPid = [int]$owners[0]
+    } elseif ([int]$owners[0] -ne $HaloPid) {
+        throw (
+            "Operator port $OperatorPort is owned by PID $($owners[0]), not " +
+            "requested Halo PID $HaloPid.")
+    }
     $haloProcess = Get-Process -Id $HaloPid -ErrorAction Stop
     if ($haloProcess.ProcessName -ne 'HaloCampaignEvolved') {
         throw "PID $HaloPid is '$($haloProcess.ProcessName)', not Halo."
@@ -232,14 +263,18 @@ try {
             ($expectedX / ($referenceWidth - 1.0)),
             ($expectedY / ($referenceHeight - 1.0)))
         $analysisPath = Join-Path $OutputDirectory "$($case.Name)-analysis.json"
-        & py -3 $analyzer `
-            --left $leftPath `
-            --right $rightPath `
-            --authored (Join-Path $OutputDirectory 'authored-reference.exr') `
-            --expected-right $expectedNormalized[0] $expectedNormalized[1] `
-            --maximum-projection-error 6.0 `
-            --maximum-stereo-error 6.0 `
-            --json $analysisPath | Out-Null
+        $analysisArguments = @(
+            '-3', $analyzer,
+            '--left', $leftPath,
+            '--right', $rightPath,
+            '--expected-right', $expectedNormalized[0], $expectedNormalized[1],
+            '--maximum-projection-error', '6.0',
+            '--maximum-stereo-error', '6.0',
+            '--json', $analysisPath)
+        if ($authoredCopy) {
+            $analysisArguments += @('--authored', $authoredCopy)
+        }
+        & py @analysisArguments | Out-Null
         $analyzerExitCode = $LASTEXITCODE
         $analysis = Get-Content -LiteralPath $analysisPath -Raw |
             ConvertFrom-Json
@@ -278,8 +313,8 @@ $summary = [pscustomobject][ordered]@{
     completed_utc = [DateTime]::UtcNow.ToString('o')
     halo_pid = $HaloPid
     halo_pid_verified = $true
-    operator_pid_requested = 8720
-    operator_pid_present_at_start = [bool](Get-Process -Id 8720 -ErrorAction SilentlyContinue)
+    operator_port = $OperatorPort
+    operator_port_owner = @($owners)
     invoke_tool_path = $InvokeToolPath
     output_directory = $OutputDirectory
     calibration = [pscustomobject]@{
@@ -294,7 +329,7 @@ $summary = [pscustomobject][ordered]@{
         maximum_projection_error_pixels = 6.0
         maximum_stereo_error_pixels = 6.0
     }
-    authored_reference = Join-Path $OutputDirectory 'authored-reference.exr'
+    authored_reference = $authoredCopy
     source_preservation = [pscustomobject]@{
         source_images_untouched = $true
         montage_uses_annotated_copies = $true

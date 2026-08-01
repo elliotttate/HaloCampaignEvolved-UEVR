@@ -1,0 +1,105 @@
+{
+  "schema_version": 1,
+  "passed": true,
+  "failures": [],
+  "left_image": "E:\\Github\\HaloCampaignEvolved-UEVR\\validation\\reticle-quad-live-20260731\\diagonal_up_right_roll-left.png",
+  "right_image": "E:\\Github\\HaloCampaignEvolved-UEVR\\validation\\reticle-quad-live-20260731\\diagonal_up_right_roll-right.png",
+  "resolution": [
+    840,
+    880
+  ],
+  "expected_right_point": [
+    383.4337218769329,
+    381.04236097097936
+  ],
+  "search_radius_px": 33.6,
+  "maximum_projection_error_px": 6.0,
+  "require_reticle_color": true,
+  "authored_reference": null,
+  "eye_background_shift_left_to_right": [
+    -204.66311070776737,
+    -0.027076587590727286
+  ],
+  "eye_background_phase_response": 0.34231749817177104,
+  "expected_left_point": [
+    588.0968325847002,
+    381.0694375585701
+  ],
+  "stereo_correspondence_error_px": 1.3371634609432805,
+  "right_candidate_count": 1,
+  "left_candidate_count": 1,
+  "right_ring": {
+    "detection_method": "strict_cyan_connected_component",
+    "centroid": [
+      383.3968253968254,
+      379.92063492063494
+    ],
+    "bbox": [
+      378,
+      375,
+      389,
+      385
+    ],
+    "dimensions": [
+      12,
+      11
+    ],
+    "area_px": 63,
+    "hole_count": 1,
+    "inner_disc_occupancy": 0.0,
+    "annular_occupancy": 0.6,
+    "circularity": 0.9145230196852047,
+    "expected_point_error_px": 1.1223326967818483,
+    "median_bgr": [
+      185.0,
+      166.0,
+      82.0
+    ],
+    "median_hsv": [
+      96.0,
+      146.0,
+      185.0
+    ],
+    "center_annulus_contrast": 57.08432539682539,
+    "score": 4.40228975000702,
+    "color_evaluable": true,
+    "color_pass": true
+  },
+  "left_ring": {
+    "detection_method": "strict_cyan_connected_component",
+    "centroid": [
+      589.3968253968254,
+      379.92063492063494
+    ],
+    "bbox": [
+      584,
+      375,
+      595,
+      385
+    ],
+    "dimensions": [
+      12,
+      11
+    ],
+    "area_px": 63,
+    "hole_count": 1,
+    "inner_disc_occupancy": 0.0,
+    "annular_occupancy": 0.6,
+    "circularity": 0.9145230196852047,
+    "expected_point_error_px": 1.7348570005922483,
+    "median_bgr": [
+      185.0,
+      165.0,
+      83.0
+    ],
+    "median_hsv": [
+      96.0,
+      142.0,
+      185.0
+    ],
+    "center_annulus_contrast": 56.47718253968253,
+    "score": 4.34103731962598,
+    "color_evaluable": true,
+    "color_pass": true
+  }
+}

@@ -1,0 +1,509 @@
+{
+  "schema_version": 1,
+  "generated_utc": "2026-08-01T01:33:43.6846060Z",
+  "target_game_pid": 41660,
+  "operator_port": 8720,
+  "operator_port_owner": [
+    41660
+  ],
+  "game_executable": "E:\\SteamLibrary\\steamapps\\common\\Halo Campaign Evolved\\Meteorite\\Binaries\\Win64\\HaloCampaignEvolved.exe",
+  "operator_package": "E:\\Github\\UEVRMetaXROperator\\dist\\release\\UEVR-Meta-XR-Operator-205.1-nightly-01139-full-controls-v3-reticle-quad-v1",
+  "original_pose": {
+    "Head": {
+      "Position": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "Orientation": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    },
+    "right-grip": {
+      "Position": [
+        0.3,
+        -0.33,
+        -0.46
+      ],
+      "Orientation": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    },
+    "right-aim": {
+      "Position": [
+        0.3,
+        -0.3,
+        -0.555
+      ],
+      "Orientation": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    },
+    "left-grip": {
+      "Position": [
+        -0.3,
+        -0.3,
+        -0.555
+      ],
+      "Orientation": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    },
+    "left-aim": {
+      "Position": [
+        -0.3,
+        -0.3,
+        -0.555
+      ],
+      "Orientation": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    }
+  },
+  "fatal_error": null,
+  "gates": [
+    {
+      "id": "HMD-01",
+      "classification": "passed",
+      "passed_cases": 7,
+      "failed_cases": 0
+    },
+    {
+      "id": "HAND-01",
+      "classification": "partial_pass_abi_gaps",
+      "passed_cases": 5,
+      "failed_cases": 0
+    },
+    {
+      "id": "TWO-01",
+      "classification": "partial_pass_abi_gaps",
+      "passed_cases": 4,
+      "failed_cases": 0
+    },
+    {
+      "id": "INP-01",
+      "classification": "failed",
+      "passed_cases": 6,
+      "failed_cases": 1
+    }
+  ],
+  "cases": [
+    {
+      "id": "HMD-01",
+      "name": "rig_translate_xyz",
+      "passed": true,
+      "metrics": {
+        "weapon_basis_min_dot": 0.9999999999999986,
+        "left_wrist_position_delta_m": 0.0,
+        "reticle_position_delta_m": 0.0,
+        "weapon_position_formula_error_m": 1.794350563220335E-08,
+        "right_wrist_position_delta_m": 1.5358066482690136E-05,
+        "right_wrist_basis_min_dot": 0.9999999989411604,
+        "weapon_barrel_aim_dot": 0.9999999999999996,
+        "left_wrist_basis_min_dot": 0.9999999999998598,
+        "weapon_position_delta_m": 2.270936965942383E-08
+      },
+      "failures": [],
+      "notes": []
+    },
+    {
+      "id": "HMD-01",
+      "name": "rig_yaw_pos_20",
+      "passed": true,
+      "metrics": {
+        "weapon_basis_min_dot": 0.9999999999999996,
+        "left_wrist_position_delta_m": 9.083747863769531E-08,
+        "reticle_position_delta_m": 0.0,
+        "weapon_position_formula_error_m": 3.3167427115979766E-09,
+        "right_wrist_position_delta_m": 1.696245503789992E-05,
+        "right_wrist_basis_min_dot": 0.9999999965031308,
+        "weapon_barrel_aim_dot": 0.9999999999999976,
+        "left_wrist_basis_min_dot": 0.9999999999999449,
+        "weapon_position_delta_m": 0.0
+      },
+      "failures": [],
+      "notes": []
+    },
+    {
+      "id": "HMD-01",
+      "name": "rig_pitch_neg_15",
+      "passed": true,
+      "metrics": {
+        "weapon_basis_min_dot": 0.9999999999999999,
+        "left_wrist_position_delta_m": 4.541873931884766E-08,
+        "reticle_position_delta_m": 0.0,
+        "weapon_position_formula_error_m": 3.690928563387893E-08,
+        "right_wrist_position_delta_m": 1.319431966107932E-05,
+        "right_wrist_basis_min_dot": 0.9999999957324432,
+        "weapon_barrel_aim_dot": 1.0,
+        "left_wrist_basis_min_dot": 0.999999999999829,
+        "weapon_position_delta_m": 4.541873931884766E-08
+      },
+      "failures": [],
+      "notes": []
+    },
+    {
+      "id": "HMD-01",
+      "name": "rig_compound",
+      "passed": true,
+      "metrics": {
+        "weapon_basis_min_dot": 0.9999999999999958,
+        "left_wrist_position_delta_m": 1.0155938856928586E-07,
+        "reticle_position_delta_m": 0.0,
+        "weapon_position_formula_error_m": 2.8949221434105842E-08,
+        "right_wrist_position_delta_m": 1.1735757535703964E-05,
+        "right_wrist_basis_min_dot": 0.9999999921639711,
+        "weapon_barrel_aim_dot": 0.9999999999999991,
+        "left_wrist_basis_min_dot": 0.9999999999998938,
+        "weapon_position_delta_m": 5.077969428464293E-08
+      },
+      "failures": [],
+      "notes": []
+    },
+    {
+      "id": "HMD-01",
+      "name": "head_only_translate_x",
+      "passed": true,
+      "metrics": {
+        "weapon_position_formula_error_m": 7.2282958553719535E-09,
+        "weapon_barrel_aim_dot": 1.0,
+        "relative_grip_delta_from_baseline_m": 0.11999999731779099
+      },
+      "failures": [],
+      "notes": []
+    },
+    {
+      "id": "HMD-01",
+      "name": "head_only_yaw_pos_20",
+      "passed": true,
+      "metrics": {
+        "weapon_position_formula_error_m": 4.134819210506852E-08,
+        "weapon_barrel_aim_dot": 0.9999999999999999,
+        "relative_grip_delta_from_baseline_m": 0.1907286357186674
+      },
+      "failures": [],
+      "notes": []
+    },
+    {
+      "id": "HMD-01",
+      "name": "head_only_pitch_neg_15",
+      "passed": true,
+      "metrics": {
+        "weapon_position_formula_error_m": 5.585559499010914E-08,
+        "weapon_barrel_aim_dot": 0.9999999999999992,
+        "relative_grip_delta_from_baseline_m": 0.1477888506749777
+      },
+      "failures": [],
+      "notes": []
+    },
+    {
+      "id": "HAND-01",
+      "name": "close_to_face",
+      "passed": true,
+      "metrics": {
+        "right_wrist_motion_magnitude_error_m": 8.377862781461243E-06,
+        "right_wrist_scale_error": 0.0,
+        "left_wrist_orthogonality_error": 4.734731330335862E-07,
+        "left_wrist_scale_error": 0.0,
+        "right_wrist_determinant_error": 3.417753857704042E-08,
+        "arm_ik_enabled": true,
+        "left_wrist_determinant_error": 4.897870553577377E-09,
+        "left_hand_max_abs_axis_dot": 2.6535063923915914E-08,
+        "left_hand_geometry_valid": true,
+        "right_hand_max_abs_axis_dot": 1.2128264037514214E-07,
+        "right_wrist_orthogonality_error": 6.00328209976464E-07,
+        "right_hand_geometry_valid": true,
+        "left_wrist_motion_magnitude_error_m": 8.407912521768424E-08
+      },
+      "failures": [],
+      "notes": [
+        "Shoulder, elbow, clavicle, triangle stretch, and tracking-loss transitions are not exposed by status ABI v1."
+      ]
+    },
+    {
+      "id": "HAND-01",
+      "name": "cross_body",
+      "passed": true,
+      "metrics": {
+        "right_wrist_motion_magnitude_error_m": 8.500628877361471E-06,
+        "right_wrist_scale_error": 0.0,
+        "left_wrist_orthogonality_error": 1.5976828926511644E-07,
+        "left_wrist_scale_error": 0.0,
+        "right_wrist_determinant_error": 1.40764762290857E-07,
+        "arm_ik_enabled": true,
+        "left_wrist_determinant_error": 1.741345412309414E-07,
+        "left_hand_max_abs_axis_dot": 6.871723989831935E-08,
+        "left_hand_geometry_valid": true,
+        "right_hand_max_abs_axis_dot": 8.60296591742582E-08,
+        "right_wrist_orthogonality_error": 3.6565116751097193E-07,
+        "right_hand_geometry_valid": true,
+        "left_wrist_motion_magnitude_error_m": 2.116647412897521E-09
+      },
+      "failures": [],
+      "notes": [
+        "Shoulder, elbow, clavicle, triangle stretch, and tracking-loss transitions are not exposed by status ABI v1."
+      ]
+    },
+    {
+      "id": "HAND-01",
+      "name": "fully_extended",
+      "passed": true,
+      "metrics": {
+        "right_wrist_motion_magnitude_error_m": 1.1364361911514465E-06,
+        "right_wrist_scale_error": 0.0,
+        "left_wrist_orthogonality_error": 7.9277504738684E-07,
+        "left_wrist_scale_error": 0.0,
+        "right_wrist_determinant_error": 7.078152775008562E-08,
+        "arm_ik_enabled": true,
+        "left_wrist_determinant_error": 7.617192521180982E-08,
+        "left_hand_max_abs_axis_dot": 6.542855324198626E-08,
+        "left_hand_geometry_valid": true,
+        "right_hand_max_abs_axis_dot": 1.896146167856827E-08,
+        "right_wrist_orthogonality_error": 6.057448258545151E-07,
+        "right_hand_geometry_valid": true,
+        "left_wrist_motion_magnitude_error_m": 7.355069453485186E-08
+      },
+      "failures": [],
+      "notes": [
+        "Shoulder, elbow, clavicle, triangle stretch, and tracking-loss transitions are not exposed by status ABI v1."
+      ]
+    },
+    {
+      "id": "HAND-01",
+      "name": "above_head",
+      "passed": true,
+      "metrics": {
+        "right_wrist_motion_magnitude_error_m": 9.994531946500018E-07,
+        "right_wrist_scale_error": 0.0,
+        "left_wrist_orthogonality_error": 1.2226364731748873E-07,
+        "left_wrist_scale_error": 0.0,
+        "right_wrist_determinant_error": 5.385353230025203E-08,
+        "arm_ik_enabled": true,
+        "left_wrist_determinant_error": 1.2079134048548212E-07,
+        "left_hand_max_abs_axis_dot": 7.363074416844029E-08,
+        "left_hand_geometry_valid": true,
+        "right_hand_max_abs_axis_dot": 6.460667201224624E-08,
+        "right_wrist_orthogonality_error": 4.6060053965346626E-07,
+        "right_hand_geometry_valid": true,
+        "left_wrist_motion_magnitude_error_m": 1.1366605756624182E-07
+      },
+      "failures": [],
+      "notes": [
+        "Shoulder, elbow, clavicle, triangle stretch, and tracking-loss transitions are not exposed by status ABI v1."
+      ]
+    },
+    {
+      "id": "HAND-01",
+      "name": "behind_shoulder",
+      "passed": true,
+      "metrics": {
+        "right_wrist_motion_magnitude_error_m": 1.1406584461970404E-05,
+        "right_wrist_scale_error": 0.0,
+        "left_wrist_orthogonality_error": 1.222163937858456E-06,
+        "left_wrist_scale_error": 0.0,
+        "right_wrist_determinant_error": 9.941722423079113E-08,
+        "arm_ik_enabled": true,
+        "left_wrist_determinant_error": 1.5608466763517015E-07,
+        "left_hand_max_abs_axis_dot": 2.280833899526158E-08,
+        "left_hand_geometry_valid": true,
+        "right_hand_max_abs_axis_dot": 2.59194603557944E-08,
+        "right_wrist_orthogonality_error": 3.7790780138546864E-07,
+        "right_hand_geometry_valid": true,
+        "left_wrist_motion_magnitude_error_m": 2.667583820503694E-08
+      },
+      "failures": [],
+      "notes": [
+        "Shoulder, elbow, clavicle, triangle stretch, and tracking-loss transitions are not exposed by status ABI v1."
+      ]
+    },
+    {
+      "id": "TWO-01",
+      "name": "outside_zone_no_latch",
+      "passed": true,
+      "metrics": {
+        "two_hand_hold_active": false
+      },
+      "failures": [],
+      "notes": []
+    },
+    {
+      "id": "TWO-01",
+      "name": "acquire_and_basis",
+      "passed": true,
+      "metrics": {
+        "reticle_hide_marker": "on",
+        "weapon_hand_line_dot": 1.0,
+        "two_hand_hold_active": true
+      },
+      "failures": [],
+      "notes": []
+    },
+    {
+      "id": "TWO-01",
+      "name": "retained_outside_zone",
+      "passed": true,
+      "metrics": {
+        "two_hand_hold_active": true
+      },
+      "failures": [],
+      "notes": []
+    },
+    {
+      "id": "TWO-01",
+      "name": "release",
+      "passed": true,
+      "metrics": {
+        "two_hand_hold_active": false,
+        "reticle_hide_marker": "off"
+      },
+      "failures": [],
+      "notes": [
+        "Pause, zoom, disable, tracking-loss release and grenade masking lack objective live ABI outputs."
+      ]
+    },
+    {
+      "id": "INP-01",
+      "name": "dpad_mode_true",
+      "passed": true,
+      "metrics": {
+        "requested": true,
+        "observed": "true"
+      },
+      "failures": [],
+      "notes": []
+    },
+    {
+      "id": "INP-01",
+      "name": "dpad_mode_false",
+      "passed": true,
+      "metrics": {
+        "requested": false,
+        "observed": "false"
+      },
+      "failures": [],
+      "notes": []
+    },
+    {
+      "id": "INP-01",
+      "name": "inside_deadzone_x",
+      "passed": true,
+      "metrics": {
+        "observed": [
+          0.10999999940395355,
+          0.0
+        ],
+        "locomotion_bridge_observed": false,
+        "released": true,
+        "commanded": [
+          0.11,
+          0.0
+        ]
+      },
+      "failures": [],
+      "notes": [
+        "Status ABI exposes raw stick echo and a sticky bridge-observed bit, not final XINPUT_GAMEPAD sThumbLX/sThumbLY values."
+      ]
+    },
+    {
+      "id": "INP-01",
+      "name": "outside_deadzone_x",
+      "passed": false,
+      "metrics": {
+        "observed": [
+          0.12999999523162842,
+          0.0
+        ],
+        "locomotion_bridge_observed": false,
+        "released": true,
+        "commanded": [
+          0.13,
+          0.0
+        ]
+      },
+      "failures": [
+        "nonzero above-deadzone stick never reached Halo XInput callback"
+      ],
+      "notes": [
+        "Status ABI exposes raw stick echo and a sticky bridge-observed bit, not final XINPUT_GAMEPAD sThumbLX/sThumbLY values."
+      ]
+    },
+    {
+      "id": "INP-01",
+      "name": "half_positive_y",
+      "passed": true,
+      "metrics": {
+        "observed": [
+          0.0,
+          0.5
+        ],
+        "locomotion_bridge_observed": true,
+        "released": true,
+        "commanded": [
+          0.0,
+          0.5
+        ]
+      },
+      "failures": [],
+      "notes": [
+        "Status ABI exposes raw stick echo and a sticky bridge-observed bit, not final XINPUT_GAMEPAD sThumbLX/sThumbLY values."
+      ]
+    },
+    {
+      "id": "INP-01",
+      "name": "full_negative_y",
+      "passed": true,
+      "metrics": {
+        "observed": [
+          0.0,
+          -1.0
+        ],
+        "locomotion_bridge_observed": true,
+        "released": true,
+        "commanded": [
+          0.0,
+          -1.0
+        ]
+      },
+      "failures": [],
+      "notes": [
+        "Status ABI exposes raw stick echo and a sticky bridge-observed bit, not final XINPUT_GAMEPAD sThumbLX/sThumbLY values."
+      ]
+    },
+    {
+      "id": "INP-01",
+      "name": "right_trigger_release",
+      "passed": true,
+      "metrics": {
+        "released_observed": true,
+        "pressed_observed": true
+      },
+      "failures": [],
+      "notes": [
+        "A/B/X/Y/Menu and physical-gamepad merge state are not exposed by the current status ABI."
+      ]
+    }
+  ],
+  "unavailable_abi_gates": [
+    "shoulder, elbow, clavicle and per-vertex stretch geometry",
+    "controller tracking-valid override for deterministic loss/reacquire",
+    "runtime ARM_IK enable/disable without plugin reload",
+    "two-hand pause, zoom, disable and grenade-consumption state",
+    "final XINPUT_GAMEPAD stick/button state and physical-gamepad merge",
+    "Operator 205.1 scalar thumbstick writes clear the other axis, preventing diagonal injection"
+  ]
+}
