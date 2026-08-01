@@ -57,6 +57,8 @@ Copy-Item -LiteralPath (Join-Path $repoRoot 'README.md') `
     -Destination (Join-Path $stageRoot 'HALO_MOTION_CONTROLS.md')
 Copy-Item -LiteralPath (Join-Path $repoRoot 'TESTING.md') `
     -Destination (Join-Path $stageRoot 'TESTING.md')
+Copy-Item -LiteralPath (Join-Path $repoRoot 'PERFORMANCE.md') `
+    -Destination (Join-Path $stageRoot 'PERFORMANCE.md')
 
 $sourceCommit = (& git -C $repoRoot rev-parse HEAD).Trim()
 $readme = Get-Content -Raw -LiteralPath (Join-Path $repoRoot 'release\README.md')

@@ -4049,17 +4049,6 @@ public:
         refresh_configuration(delta);
         update_kill_switch();
 
-        // UEVR loads the per-game config after external plugins initialize.
-        // Keep the requested mode authoritative on every launch.
-        API::VR::set_aim_method(API::VR::AimMethod::GAME);
-        API::VR::set_decoupled_pitch_enabled(false);
-        API::VR::set_mod_value("VR_DecoupledPitchUIAdjust", false);
-        // Halo's dominant_hand setting owns semantic hand selection.  UEVR's
-        // global swap would otherwise swap physical indices first and Halo
-        // would swap them again, returning a left-dominant profile to the
-        // physical right controller.
-        API::VR::set_mod_value("VR_SwapControllerInputs", false);
-
         if (engine == nullptr) {
             return;
         }
@@ -4068,6 +4057,11 @@ public:
         if (m_engine_uptime < 3.0f) {
             return;
         }
+        m_uobject_discovery_timer = std::max(
+            0.0f,
+            m_uobject_discovery_timer - std::max(delta, 0.0f));
+
+        apply_uevr_runtime_compatibility_once();
 
         const auto cinematic = halo_cinematic_in_progress();
         const auto previous_cinematic = g_cinematic_active.exchange(
@@ -4090,10 +4084,14 @@ public:
         // heap double-free.
         synchronize_world_reticle_owner();
 
+        const auto mod_enabled =
+            g_mod_enabled.load(std::memory_order_acquire);
+        const auto cutscene_comfort =
+            g_cutscene_comfort_enabled.load(std::memory_order_acquire);
+        update_cutscene_2d_mode(
+            mod_enabled && cinematic && cutscene_comfort);
         const auto suspended =
-            !g_mod_enabled.load(std::memory_order_acquire) ||
-            (cinematic &&
-             g_cutscene_comfort_enabled.load(std::memory_order_acquire));
+            !mod_enabled || (cinematic && cutscene_comfort);
         if (suspended) {
             publish_tracking_snapshot({});
             publish_gameplay_ready(false);
@@ -4346,6 +4344,57 @@ public:
 
 private:
     enum class CalibrationMode { None, Controller, Weapon };
+
+    void apply_uevr_runtime_compatibility_once() {
+        if (m_uevr_runtime_settings_applied) {
+            return;
+        }
+
+        // External plugins initialize before UEVR finishes loading the
+        // per-game profile. Apply these invariants once after that bootstrap
+        // window rather than walking UEVR's complete mod-value list every
+        // engine tick.
+        API::VR::set_aim_method(API::VR::AimMethod::GAME);
+        API::VR::set_decoupled_pitch_enabled(false);
+        API::VR::set_mod_value("VR_DecoupledPitchUIAdjust", false);
+        // Halo's dominant_hand setting owns semantic hand selection. UEVR's
+        // global swap would otherwise swap physical indices first and Halo
+        // would swap them again.
+        API::VR::set_mod_value("VR_SwapControllerInputs", false);
+        // This is a stock praydog UEVR setting. The default 30-second timeout
+        // can mark a valid stationary/simulated controller inactive; 100 is
+        // the official slider maximum.
+        API::VR::set_mod_value(
+            "VR_MotionControlsInactivityTimer", 100.0f);
+        m_uevr_runtime_settings_applied = true;
+        API::get()->log_info(
+            "HaloCEMotionControls: official UEVR runtime invariants applied; "
+            "motion-controller inactivity timeout=100 seconds");
+    }
+
+    void update_cutscene_2d_mode(bool desired) {
+        if (desired == m_cutscene_2d_active) {
+            return;
+        }
+
+        if (desired) {
+            m_cutscene_2d_restore_value =
+                API::VR::get_mod_value<bool>("VR_2DScreenMode");
+            API::VR::set_mod_value("VR_2DScreenMode", true);
+            m_cutscene_2d_active = true;
+            API::get()->log_info(
+                "HaloCEMotionControls: cutscene comfort entered UEVR 2D "
+                "screen mode");
+            return;
+        }
+
+        API::VR::set_mod_value(
+            "VR_2DScreenMode", m_cutscene_2d_restore_value);
+        m_cutscene_2d_active = false;
+        API::get()->log_info(
+            "HaloCEMotionControls: cutscene comfort restored the previous "
+            "UEVR display mode");
+    }
 
     void apply_configuration(bool log_state) {
         const auto& config = m_config_store.runtime();
@@ -5303,7 +5352,28 @@ private:
         auto* const owner = API::get()->get_local_pawn(0);
         if (owner != m_reticle_owner) {
             reset_world_reticle_cache(owner, true);
+            m_uobject_discovery_timer = 0.0f;
+            m_uobject_discovery_failures = 0;
         }
+    }
+
+    void finish_uobject_discovery_attempt(bool success) {
+        if (success) {
+            m_uobject_discovery_timer = 0.0f;
+            m_uobject_discovery_failures = 0;
+            return;
+        }
+
+        // A missing widget can otherwise make every 4 Hz maintenance pass
+        // walk Halo's roughly 300,000-entry GUObjectArray several times. Keep
+        // the first recovery attempts responsive, then cap retries at 2 s.
+        m_uobject_discovery_failures = std::min<std::uint32_t>(
+            m_uobject_discovery_failures + 1,
+            4);
+        const auto shift = m_uobject_discovery_failures - 1;
+        m_uobject_discovery_timer = std::min(
+            2.0f,
+            0.25f * static_cast<float>(1u << shift));
     }
 
     bool set_world_reticle_main_pass(bool enabled) {
@@ -5369,18 +5439,31 @@ private:
         }
         if (owner != m_reticle_owner) {
             reset_world_reticle_cache(owner, true);
+            m_uobject_discovery_timer = 0.0f;
+            m_uobject_discovery_failures = 0;
         }
+
+        const bool needs_uobject_discovery =
+            m_world_reticle_component == nullptr ||
+            m_screen_reticle_image == nullptr ||
+            m_world_reticle_image == nullptr;
+        if (needs_uobject_discovery && m_uobject_discovery_timer > 0.0f) {
+            return;
+        }
+        bool attempted_uobject_discovery = false;
 
         auto* const widget_component_class =
             api->find_uobject<API::UClass>(
                 L"Class /Script/UMG.WidgetComponent");
         if (m_world_reticle_component == nullptr) {
+            attempted_uobject_discovery = true;
             m_world_reticle_component =
                 find_active_world_reticle_component(
                     widget_component_class,
                     owner);
         }
         if (m_world_reticle_component == nullptr) {
+            finish_uobject_discovery_attempt(false);
             log_reticle_state(
                 1,
                 "HaloCEMotionControls: waiting for Lua WidgetComponent");
@@ -5442,10 +5525,12 @@ private:
             api->find_uobject<API::UClass>(
                 L"Class /Script/HaloUI.HaloUILazyImage");
         if (m_screen_reticle_image == nullptr) {
+            attempted_uobject_discovery = true;
             m_screen_reticle_image =
                 find_screen_reticle_image(lazy_image_class);
         }
         if (m_world_reticle_image == nullptr) {
+            attempted_uobject_discovery = true;
             m_world_reticle_image = find_reticle_object(
                 lazy_image_class,
                 L".Reticle_Image",
@@ -5453,6 +5538,7 @@ private:
         }
         if (m_screen_reticle_image == nullptr ||
             m_world_reticle_image == nullptr) {
+            finish_uobject_discovery_attempt(false);
             log_reticle_state(
                 m_screen_reticle_image == nullptr ? 4 : 5,
                 m_screen_reticle_image == nullptr
@@ -5461,6 +5547,9 @@ private:
                     : "HaloCEMotionControls: waiting for world "
                       "Reticle_Image");
             return;
+        }
+        if (attempted_uobject_discovery) {
+            finish_uobject_discovery_attempt(true);
         }
         if (!m_world_reticle_pruned) {
             if (!prune_world_reticle_overlay()) {
@@ -5899,18 +5988,27 @@ private:
             // receiving callbacks. A non-null handle obtained during that
             // bootstrap window can therefore become stale when the runtime
             // rebuilds the set. Resolve from UEVR's current action map every
-            // update; this is a cheap lookup and also survives session
-            // recreation without requiring an exposed action-set generation.
+            // refresh. This also survives session recreation without requiring
+            // an exposed action-set generation.
             handle = API::VR::get_action_handle(path);
         };
-        resolve(trigger_value, "/actions/default/in/TriggerValue");
-        resolve(squeeze_value, "/actions/default/in/Squeeze");
-        resolve(left_thumbrest, "/actions/default/in/ThumbrestTouchLeft");
-        resolve(right_thumbrest, "/actions/default/in/ThumbrestTouchRight");
-        resolve(left_a_touch, "/actions/default/in/AButtonTouchLeft");
-        resolve(left_b_touch, "/actions/default/in/BButtonTouchLeft");
-        resolve(right_a_touch, "/actions/default/in/AButtonTouchRight");
-        resolve(right_b_touch, "/actions/default/in/BButtonTouchRight");
+        static float action_refresh_timer{};
+        action_refresh_timer -= std::max(delta, 0.0f);
+        if (action_refresh_timer <= 0.0f) {
+            // UEVR stores these paths in an unordered_map<string, ...> and its
+            // public lookup converts each C string to a temporary std::string.
+            // Two refreshes per second retain session-recreation recovery while
+            // removing eight name lookups (and their allocations) per frame.
+            action_refresh_timer = 0.5f;
+            resolve(trigger_value, "/actions/default/in/TriggerValue");
+            resolve(squeeze_value, "/actions/default/in/Squeeze");
+            resolve(left_thumbrest, "/actions/default/in/ThumbrestTouchLeft");
+            resolve(right_thumbrest, "/actions/default/in/ThumbrestTouchRight");
+            resolve(left_a_touch, "/actions/default/in/AButtonTouchLeft");
+            resolve(left_b_touch, "/actions/default/in/BButtonTouchLeft");
+            resolve(right_a_touch, "/actions/default/in/AButtonTouchRight");
+            resolve(right_b_touch, "/actions/default/in/BButtonTouchRight");
+        }
 
         const auto active = [](UEVR_ActionHandle handle,
                                UEVR_InputSourceHandle source) {
@@ -6071,7 +6169,6 @@ private:
 
     void maintain_weapon_attachment() {
         auto& api = API::get();
-        clear_ue_visual_attachment();
 
         auto* pawn_class =
             api->find_uobject<API::UClass>(L"Class /Script/BlamEngine.BlamPawn");
@@ -6199,26 +6296,6 @@ private:
         g_game_paused.store(paused, std::memory_order_release);
     }
 
-    void clear_ue_visual_attachment() {
-        for (auto* component : m_attached_components) {
-            if (component != nullptr) {
-                API::UObjectHook::remove_motion_controller_state(component);
-            }
-        }
-        m_attached_components.clear();
-        m_attached_weapon_actor = nullptr;
-
-        if (m_attached_component != nullptr &&
-            API::UObjectHook::get_motion_controller_state(
-                m_attached_component) != nullptr) {
-            API::UObjectHook::remove_motion_controller_state(
-                m_attached_component);
-        }
-        m_attached_component = nullptr;
-        g_visual_weapon_attached.store(false, std::memory_order_release);
-        g_attached_component.store(0, std::memory_order_release);
-    }
-
     bool m_armed{};
     halo_cevr::ConfigStore m_config_store{};
     std::optional<bool> m_session_enabled_override{};
@@ -6233,10 +6310,12 @@ private:
     bool m_native_hook_attempted{};
     bool m_native_hooks_installed{};
     float m_engine_uptime{};
+    bool m_uevr_runtime_settings_applied{};
+    bool m_cutscene_2d_active{};
+    bool m_cutscene_2d_restore_value{};
     float m_discovery_timer{};
-    API::UObject* m_attached_component{};
-    API::UObject* m_attached_weapon_actor{};
-    std::vector<API::UObject*> m_attached_components{};
+    float m_uobject_discovery_timer{};
+    std::uint32_t m_uobject_discovery_failures{};
     API::UObject* m_reticle_owner{};
     API::UObject* m_world_reticle_component{};
     API::UObject* m_world_reticle_widget{};

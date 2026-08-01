@@ -10,6 +10,8 @@ The repeatable build, simulator, reticle, ballistics, lifecycle, performance,
 standalone, and headset acceptance suites are documented in
 [`TESTING.md`](TESTING.md). Run `tools\Invoke-HaloModValidation.ps1 -Suite
 Plan` to list them without changing or connecting to a live session.
+The steady-state and recovery-path cost audit is documented in
+[`PERFORMANCE.md`](PERFORMANCE.md).
 
 The optional extended debugging backend lives in
 [UEVRMetaXROperator](https://github.com/elliotttate/UEVRMetaXROperator), but the
@@ -264,6 +266,7 @@ The profile must contain these values in
 ```ini
 VR_ControllersAllowed=true
 VR_ForceMotionControlsActive=true
+VR_MotionControlsInactivityTimer=100.000000
 VR_DecoupledPitch=false
 VR_DecoupledPitchUIAdjust=false
 UI_ExternalCompositorQuad=true
@@ -274,9 +277,15 @@ UObjectHook_AttachLerpEnabled=false
 VR_MetaXROperatorEnabled=false
 ```
 
+The stock UEVR inactivity timer is raised to its supported maximum so a valid
+stationary controller (especially a simulated controller) is not discarded after
+30 seconds. With `cutscene_comfort=true` in `data\halo_motion_controls.cfg`, the
+native Halo cinematic detector also switches UEVR to 2D screen mode for the
+duration of a cinematic and restores the user's prior display mode afterward.
+
 The packaged launchers download and checksum the pinned official UEVR nightly,
 perform the two profile file copies, verify both SHA-256 hashes, and upsert and
-verify all nine values automatically.
+verify the required profile and camera values automatically.
 `VR_AimMethod=0` is UEVR's `GAME` mode: controller tracking remains available
 to the plugin without rotating Halo's game camera.
 

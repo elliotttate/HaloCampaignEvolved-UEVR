@@ -22,6 +22,7 @@ local screen_reticle_original_opacity = 1.0
 local screen_reticle_suppressed = false
 local anchor = nil
 local retry_frames = 0
+local retry_delay_frames = 30
 local pose_frames = 0
 local last_error = nil
 local last_release_reason = nil
@@ -836,7 +837,10 @@ uevr.sdk.callbacks.on_pre_viewport_client_draw(
 
     marker_poll_frames = marker_poll_frames - 1
     if marker_poll_frames <= 0 then
-        marker_poll_frames = 12
+        -- This callback can run once per eye. Six polls per second at 90 Hz is
+        -- ample for transition markers and avoids opening two files on nearly
+        -- every visible frame.
+        marker_poll_frames = 30
         gameplay_ready =
             read_marker(gameplay_path, "ready\n"):sub(1, 5) == "ready"
         replacement_hidden =
@@ -923,7 +927,9 @@ uevr.sdk.callbacks.on_pre_viewport_client_draw(
 
         pose_frames = pose_frames - 1
         if pose_frames <= 0 then
-            pose_frames = 60
+            -- Pose output is diagnostic only. One stereo-second cadence keeps
+            -- it useful without continuously rewriting three marker files.
+            pose_frames = 180
             pcall(function()
                 -- The native plugin deliberately clears this marker during
                 -- reload/init. Republish while the owned world widget remains
@@ -974,7 +980,10 @@ uevr.sdk.callbacks.on_pre_viewport_client_draw(
     if retry_frames > 0 then
         return
     end
-    retry_frames = 60
-
-    attempt_create()
+    if attempt_create() then
+        retry_delay_frames = 30
+    else
+        retry_frames = retry_delay_frames
+        retry_delay_frames = math.min(retry_delay_frames * 2, 480)
+    end
 end)

@@ -129,8 +129,10 @@ over subsequently edited files.
   before retrying. The launcher will not inject into an ambiguous old session.
 - **No controller movement:** confirm the desired OpenXR runtime is active and
   that the profile contains `VR_ControllersAllowed=true` and
-  `VR_ForceMotionControlsActive=true`. Re-run `Install-HaloCEVR.ps1` to repair
-  the package-owned values.
+  `VR_MotionControlsInactivityTimer=100.000000`. The legacy
+  `VR_ForceMotionControlsActive=true` key is also written for Operator builds,
+  but stock praydog UEVR uses the inactivity timer. Re-run
+  `Install-HaloCEVR.ps1` to repair the package-owned values.
 - **Hands move opposite the head:** controller poses are tracking-space poses.
   In Meta XR Simulator use **Controllers Follow: Head** for a carried-rig test,
   and end any old Operator-owned XR session before returning to simulator input.

@@ -145,6 +145,27 @@ foreach ($token in $requiredLateTrackingTokens) {
     }
 }
 
+$requiredOfficialUevrCompatibilityTokens = @(
+    'apply_uevr_runtime_compatibility_once',
+    'VR_MotionControlsInactivityTimer',
+    'update_cutscene_2d_mode',
+    'VR_2DScreenMode',
+    'm_cutscene_2d_restore_value',
+    'action_refresh_timer = 0.5f',
+    'finish_uobject_discovery_attempt',
+    'm_uobject_discovery_timer',
+    'm_uobject_discovery_failures'
+)
+foreach ($token in $requiredOfficialUevrCompatibilityTokens) {
+    if (-not $source.Contains($token)) {
+        throw "Missing official UEVR compatibility token: $token"
+    }
+}
+
+if ($source.Contains('clear_ue_visual_attachment();')) {
+    throw 'The retired UObject attachment cleanup still runs periodically'
+}
+
 $requiredLocomotionTokens = @(
     'on_xinput_get_state',
     'get_left_joystick_source',

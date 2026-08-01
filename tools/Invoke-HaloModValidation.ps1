@@ -432,6 +432,7 @@ function Invoke-OfflineTier {
             Frontend_RequestedRuntime = 'openxr_loader.dll'
             VR_ControllersAllowed = 'true'
             VR_ForceMotionControlsActive = 'true'
+            VR_MotionControlsInactivityTimer = '100.000000'
             VR_AimMethod = '0'
             VR_AimModifyPlayerControlRotation = 'false'
             VR_AimUsePawnControlRotation = 'false'
