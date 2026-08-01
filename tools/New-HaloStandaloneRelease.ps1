@@ -4,7 +4,7 @@ param(
     [string]$BuildDirectory = '',
     [string]$OperatorPackageRoot = (
         'E:\Github\UEVRMetaXROperator\dist\release\' +
-        'UEVR-Meta-XR-Operator-205.1-nightly-01139-full-controls-v3'),
+        'UEVR-Meta-XR-Operator-205.1-nightly-01139-analog-hands-v1'),
     [string]$OutputRoot = ''
 )
 
@@ -94,7 +94,7 @@ $manifest = [ordered]@{
     source_repository = 'https://github.com/elliotttate/HaloCampaignEvolved-UEVR'
     source_commit = $sourceCommit
     paired_uevr_package = Split-Path -Leaf $OperatorPackageRoot
-    runtime_model = 'standalone UEVR API 2.40; no MCP or Meta XR Operator dependency'
+    runtime_model = 'standalone UEVR API 2.43; no MCP or Meta XR Operator dependency'
     plugin_sha256 = (Get-FileHash -LiteralPath (
         Join-Path $stageRoot 'plugins\HaloCEMotionControls.dll') -Algorithm SHA256).Hash
     reticle_lua_sha256 = (Get-FileHash -LiteralPath (

@@ -68,7 +68,7 @@ Run both and pin the current v3 Operator package:
 pwsh -NoProfile -File .\tools\Invoke-HaloPoseMatrixTest.ps1 `
     -Suite Both `
     -OperatorPackageRoot `
-      'E:\Github\UEVRMetaXROperator\dist\release\UEVR-Meta-XR-Operator-205.1-nightly-01139-full-controls-v3'
+      'E:\Github\UEVRMetaXROperator\dist\release\UEVR-Meta-XR-Operator-205.1-nightly-01139-analog-hands-v1'
 ```
 
 Preview the generated case matrix without connecting to a running session:

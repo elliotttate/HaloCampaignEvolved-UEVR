@@ -7,7 +7,7 @@ param(
 
     [string]$OperatorPackageRoot = (
         'E:\Github\UEVRMetaXROperator\dist\release\' +
-        'UEVR-Meta-XR-Operator-205.1-nightly-01139-full-controls-v3'),
+        'UEVR-Meta-XR-Operator-205.1-nightly-01139-analog-hands-v1'),
 
     [string]$OutputDirectory = '',
 

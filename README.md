@@ -122,7 +122,7 @@ Halo's XInput state, and an engaged two-handed hold (bit 8).
 
 ## Controller latency
 
-This profile requires the paired UEVR API 2.40 build. UEVR exposes one
+This profile requires the paired UEVR API 2.43 build. UEVR exposes one
 on-demand OpenXR tracking snapshot containing the HMD plus both controllers'
 grip and aim poses, all located at the same current predicted display time.
 The native first-person palette hook requests this snapshot immediately before
@@ -237,7 +237,7 @@ visible or is restored.
 
 The [GitHub Releases](https://github.com/elliotttate/HaloCampaignEvolved-UEVR/releases)
 package is self-contained: extract it, run `Verify-Package.ps1`, then run
-`Install-HaloCEVR.ps1`. It carries the matching UEVR API 2.40 backend,
+`Install-HaloCEVR.ps1`. It carries the matching UEVR API 2.43 backend,
 injector, native plugin, Lua reticle, profile-safe installer/uninstaller, and
 checksums. Meta XR Operator and MCP are deliberately excluded from the runtime
 package.

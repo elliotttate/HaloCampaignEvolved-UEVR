@@ -1,7 +1,7 @@
 # Halo Campaign Evolved UEVR standalone @VERSION@
 
 This is the self-contained, no-MCP release of the Halo Campaign Evolved 6DOF
-motion-control mod. It includes the paired UEVR API 2.40 backend and injector,
+motion-control mod. It includes the paired UEVR API 2.43 backend and injector,
 the native `HaloCEMotionControls.dll`, and the authored world-reticle Lua
 script. Source commit: `@SOURCE_COMMIT@`.
 
