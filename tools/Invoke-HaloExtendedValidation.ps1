@@ -718,21 +718,35 @@ try {
         $status=Get-Status
         $observedX=[double]$status.input.left_stick.x
         $observedY=[double]$status.input.left_stick.y
+        $finalX=[int]$status.halo_motion_controls.pose_diagnostics.final_xinput_left_x
+        $finalY=[int]$status.halo_motion_controls.pose_diagnostics.final_xinput_left_y
         $fail=[System.Collections.Generic.List[string]]::new()
         if([Math]::Abs($observedX-$stickCase.X) -gt 0.01 -or [Math]::Abs($observedY-$stickCase.Y) -gt 0.01){$fail.Add('Operator stick echo differed from command')}
-        if($stickCase.Name -ne 'inside_deadzone_x' -and -not [bool]$status.halo_motion_controls.locomotion_bridge_observed){$fail.Add('nonzero above-deadzone stick never reached Halo XInput callback')}
+        if($stickCase.Name -eq 'inside_deadzone_x') {
+            if([Math]::Abs($finalX) -gt 1 -or [Math]::Abs($finalY) -gt 1){$fail.Add('inside-deadzone stick leaked into final Halo XInput state')}
+        } else {
+            if(-not [bool]$status.halo_motion_controls.locomotion_bridge_observed){$fail.Add('nonzero above-deadzone stick never reached Halo XInput callback')}
+            if($stickCase.X -gt 0 -and $finalX -le 0){$fail.Add('positive X input did not reach final Halo XInput with positive sign')}
+            if($stickCase.X -lt 0 -and $finalX -ge 0){$fail.Add('negative X input did not reach final Halo XInput with negative sign')}
+            if($stickCase.Y -gt 0 -and $finalY -le 0){$fail.Add('positive Y input did not reach final Halo XInput with positive sign')}
+            if($stickCase.Y -lt 0 -and $finalY -ge 0){$fail.Add('negative Y input did not reach final Halo XInput with negative sign')}
+        }
         Set-ControllerInput left Thumbstick 0.0 X
         Set-ControllerInput left Thumbstick 0.0 Y
         Start-Sleep -Milliseconds 80
         $releasedStick=Get-Status
         $releasedOk=[Math]::Abs([double]$releasedStick.input.left_stick.x) -le 0.001 -and [Math]::Abs([double]$releasedStick.input.left_stick.y) -le 0.001
         if(-not $releasedOk){$fail.Add('left stick did not return to zero')}
+        $releasedFinalX=[int]$releasedStick.halo_motion_controls.pose_diagnostics.final_xinput_left_x
+        $releasedFinalY=[int]$releasedStick.halo_motion_controls.pose_diagnostics.final_xinput_left_y
+        if([Math]::Abs($releasedFinalX) -gt 1 -or [Math]::Abs($releasedFinalY) -gt 1){$fail.Add('released stick remained nonzero in final Halo XInput state')}
         Add-CaseResult INP-01 $stickCase.Name @{
             commanded=@($stickCase.X,$stickCase.Y); observed=@($observedX,$observedY)
+            final_xinput=@($finalX,$finalY)
             released=$releasedOk
+            released_final_xinput=@($releasedFinalX,$releasedFinalY)
             locomotion_bridge_observed=[bool]$status.halo_motion_controls.locomotion_bridge_observed
-        } $fail.ToArray() @(
-            'Status ABI exposes raw stick echo and a sticky bridge-observed bit, not final XINPUT_GAMEPAD sThumbLX/sThumbLY values.')
+        } $fail.ToArray()
     }
 
     Set-ControllerInput right Trigger 1.0

@@ -149,7 +149,10 @@ $requiredLocomotionTokens = @(
     'on_xinput_get_state',
     'get_left_joystick_source',
     'XINPUT_GAMEPAD_DPAD_UP',
-    'Do not re-inject analog movement on top of the shifted buttons',
+    'Never layer analog locomotion over a menu/select input',
+    'existing UEVR/gamepad output is preserved',
+    'radial_deadzone',
+    'VR_MovementOrientation',
     'sThumbLX',
     'sThumbLY'
 )

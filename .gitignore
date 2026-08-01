@@ -26,6 +26,8 @@ cmake_install.cmake
 evidence/
 /diagnostics/
 /dist/
+/artifacts/
+/.tools/
 /tools/pose-matrix-results/
 /tools/pose-matrix-static-check-*/
 *.stackdump

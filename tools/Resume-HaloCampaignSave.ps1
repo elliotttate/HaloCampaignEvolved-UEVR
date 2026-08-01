@@ -42,7 +42,7 @@ assert(
 
 local pc = uevr.api.get_player_controller(0)
 assert(
-    pc and uevr.uobject_hook.exists(pc),
+    pc and pc:get_address() ~= 0,
     "player controller not ready")
 
 local flows = mcp.objects_of_class(

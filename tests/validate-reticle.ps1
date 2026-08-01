@@ -66,11 +66,51 @@ foreach ($entry in @(
     @('L"bDisableDepthTest"', 'Widget3D pass depth-test property'),
     @('set_world_reticle_draw_size(250, 250)', '250 by 250 authored draw size'),
     @('set_world_reticle_scale(kWorldReticleScale)', 'native scale enforcement'),
+    @('get_dynamic_material(m_screen_reticle_image)', 'stock live reticle MID source'),
+    @('get_brush_resource_object(m_world_reticle_image)', 'world brush identity verifier'),
+    @('set_reticle_image_material(', 'world brush material setter'),
+    @('m_world_reticle_image,', 'world Reticle_Image destination'),
+    @('source_material))', 'exact source MID handoff'),
+    @('set_reticle_image_opacity(m_screen_reticle_image, 0.0f)', 'screen-space source suppression'),
+    @('m_shared_reticle_material = source_material', 'shared stock MID cache'),
+    @('state.texture = m_world_reticle_render_target->to_handle()', 'compositor render-target publication'),
     @('weapon-specific world reticle retained', 'weapon material retention'),
     @('reticle_position - destination.position', 'muzzle convergence'),
     @('direction_override->reticle_position - *start', 'first sweep convergence')
 )) {
     Require-Token -Text $source -Token $entry[0] -Description $entry[1]
+}
+
+# Halo's original WBP_FirstPersonReticle remains the only targeting/color
+# authority. The plugin must share that exact live MID with the isolated world
+# image, hide only the source pixels, and then publish the world render target.
+$handoffTokens = @(
+    'get_dynamic_material(m_screen_reticle_image)',
+    'get_brush_resource_object(m_world_reticle_image)',
+    'set_reticle_image_material(',
+    'set_reticle_image_opacity(m_screen_reticle_image, 0.0f)',
+    'm_shared_reticle_material = source_material',
+    'state.texture = m_world_reticle_render_target->to_handle()')
+$previousIndex = -1
+foreach ($token in $handoffTokens) {
+    $index = $source.IndexOf($token, $previousIndex + 1)
+    if ($index -lt 0) {
+        throw "Stock-reticle handoff token is missing or out of order: $token"
+    }
+    $previousIndex = $index
+}
+
+foreach ($entry in @(
+    @('LineTraceSingle', 'duplicate Unreal targeting trace'),
+    @('BreakHitResult', 'duplicate Unreal hit-result decoder'),
+    @('ActorTeamIsFriendly', 'duplicate team classifier'),
+    @('ActorTeamIsEnemy', 'duplicate team classifier'),
+    @('OnChangedAimAssistTarget', 'synthetic stock-reticle event injection'),
+    @('CurrentReticleTargetActor', 'synthetic target-state mutation'),
+    @('update_world_reticle_target_color', 'post-tick reticle color override'),
+    @('controller reticle target=', 'custom target/color diagnostic path')
+)) {
+    Reject-Token -Text $source -Token $entry[0] -Description $entry[1]
 }
 
 $sourceScaleMatch = [regex]::Match(

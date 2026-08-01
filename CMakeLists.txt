@@ -16,6 +16,8 @@ set(
 )
 
 add_library(HaloCEMotionControls SHARED
+    src/HaloCEVRConfig.cpp
+    src/HaloCEVRCore.cpp
     src/main.cpp
 )
 
@@ -34,6 +36,23 @@ set_target_properties(HaloCEMotionControls PROPERTIES
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(HaloCEVRCoreTests
+        tests/test-core.cpp
+        src/HaloCEVRConfig.cpp
+        src/HaloCEVRCore.cpp
+    )
+    target_compile_features(HaloCEVRCoreTests PRIVATE cxx_std_20)
+    target_compile_definitions(HaloCEVRCoreTests PRIVATE
+        WIN32_LEAN_AND_MEAN
+        NOMINMAX
+    )
+    target_include_directories(HaloCEVRCoreTests PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(
+        NAME HaloCEMotionControls.CoreUnitTests
+        COMMAND HaloCEVRCoreTests
+    )
     add_test(
         NAME HaloCEMotionControls.SourceValidation
         COMMAND powershell

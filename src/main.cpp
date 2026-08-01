@@ -1,6 +1,9 @@
 #include <uevr/HaloCEVRDiagnostics.h>
 #include <uevr/Plugin.hpp>
 
+#include "HaloCEVRConfig.hpp"
+#include "HaloCEVRCore.hpp"
+
 #include <Windows.h>
 #include <intrin.h>
 
@@ -16,6 +19,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -46,6 +50,10 @@ constexpr std::uint32_t kStatusLeftTrackingValid = 1U << 5;
 constexpr std::uint32_t kStatusTwoHandIkEnabled = 1U << 6;
 constexpr std::uint32_t kStatusLocomotionBridgeObserved = 1U << 7;
 constexpr std::uint32_t kStatusTwoHandHoldActive = 1U << 8;
+constexpr std::uint32_t kStatusModEnabled = 1U << 9;
+constexpr std::uint32_t kStatusCinematicActive = 1U << 10;
+constexpr std::uint32_t kStatusDominantHandLeft = 1U << 11;
+constexpr std::uint32_t kStatusLogicalAimFollower = 1U << 12;
 constexpr std::uint32_t kDiagnosticVisualValid = 1U << 0;
 constexpr std::uint32_t kDiagnosticMarkerValid = 1U << 1;
 constexpr std::uint32_t kDiagnosticProjectileValid = 1U << 2;
@@ -135,6 +143,11 @@ struct UnrealLinearColor {
     float g{};
     float b{};
     float a{};
+};
+
+struct ControllerWorldRay {
+    UnrealVector origin{};
+    UnrealVector direction{1.0, 0.0, 0.0};
 };
 
 constexpr double kWorldReticleScale = 1.0;
@@ -383,6 +396,50 @@ std::atomic_bool g_local_zoomed{};
 std::atomic_bool g_game_paused{};
 std::atomic_int g_reticle_hide_published{-1};
 std::atomic_bool g_locomotion_bridge_observed{};
+std::atomic_bool g_mod_enabled{true};
+std::atomic_bool g_cinematic_active{};
+std::atomic_bool g_cutscene_comfort_enabled{true};
+std::atomic_bool g_dominant_hand_left{};
+std::atomic_bool g_head_relative_movement{true};
+std::atomic<float> g_movement_deadzone{0.12f};
+std::atomic_bool g_dpad_shift_enabled{true};
+std::atomic<float> g_dpad_deadzone{0.55f};
+std::atomic_bool g_crouch_on_right_stick_down{true};
+std::atomic_bool g_menu_button_is_back{true};
+std::atomic_bool g_logical_aim_follower_enabled{};
+std::atomic<float> g_logical_aim_x{};
+std::atomic<float> g_logical_aim_y{};
+std::atomic<float> g_reticle_distance_meters{10.0f};
+std::atomic<float> g_reticle_extent_meters{2.5f};
+// Physical controller input is kept separate from dominant/support hand
+// selection.  UEVR's XInput bridge is the compatibility source on older
+// builds; the Operator fork can additionally supply proportional OpenXR
+// values without changing the visual-hand mapping below.
+struct PhysicalHandInputState {
+    std::atomic<float> trigger_target{};
+    std::atomic<float> grip_target{};
+    std::atomic<float> thumb_target{};
+    std::atomic<float> trigger{1.0f};
+    std::atomic<float> grip{1.0f};
+    std::atomic<float> thumb{1.0f};
+};
+PhysicalHandInputState g_physical_left_input{};
+PhysicalHandInputState g_physical_right_input{};
+std::atomic_bool g_physical_hand_input_observed{};
+std::atomic_bool g_physical_hand_input_logged{};
+std::array<std::atomic<float>, 3> g_visual_right_hand_curl{};
+std::array<std::atomic<float>, 3> g_visual_left_hand_curl{};
+std::atomic<float> g_right_index_tip_distance_blam{};
+std::atomic<float> g_left_index_tip_distance_blam{};
+std::atomic<std::int32_t> g_final_xinput_left_x{};
+std::atomic<std::int32_t> g_final_xinput_left_y{};
+std::atomic<std::int32_t> g_final_xinput_right_x{};
+std::atomic<std::int32_t> g_final_xinput_right_y{};
+std::atomic<std::uint32_t> g_final_xinput_buttons{};
+std::atomic<std::uint32_t> g_xinput_callback_count{};
+std::mutex g_calibration_mutex{};
+halo_cevr::PoseOffset g_controller_calibration{};
+halo_cevr::PoseOffset g_weapon_calibration{};
 
 TriggerCreateProjectilesFn g_original_trigger_create_projectiles{};
 GetMarkersFn g_original_get_markers{};
@@ -412,6 +469,48 @@ constexpr std::size_t kChudBankTlsOffset = 0x428;
 constexpr std::size_t kChudRecordStride = 0xC8C;
 constexpr std::size_t kChudCrosshairVisibilityOffset = 0x354;
 constexpr std::size_t kChudRecordCount = 16;
+constexpr std::size_t kCinematicScriptWrapperRva = 0x1E42A0;
+constexpr std::size_t kCinematicGlobalsTlsOffset = 0xA8;
+constexpr std::size_t kCinematicInProgressOffset = 0x05;
+
+bool halo_cinematic_in_progress() {
+    if (g_simulation_module == nullptr) {
+        return false;
+    }
+#if defined(_MSC_VER)
+    __try {
+#endif
+        // Current x64 wrapper starts with
+        //   mov ecx,[rip+HaloTlsIndex]; mov r9d,edx; mov rax,gs:[58h]
+        // Validate those fixed bytes before following the recovered TLS path.
+        constexpr std::array<std::uint8_t, 9> signature{
+            0x8B, 0x0D, 0x8A, 0xE4, 0xB8, 0x00, 0x44, 0x8B, 0xCA};
+        const auto* const wrapper =
+            g_simulation_module + kCinematicScriptWrapperRva;
+        if (!std::equal(signature.begin(), signature.end(), wrapper)) {
+            return false;
+        }
+        const auto tls_index = *reinterpret_cast<const DWORD*>(
+            g_simulation_module + kHaloTlsIndexRva);
+        auto** const tls_slots =
+            reinterpret_cast<void**>(__readgsqword(0x58));
+        auto* const tls = tls_slots != nullptr
+            ? static_cast<std::uint8_t*>(tls_slots[tls_index])
+            : nullptr;
+        if (tls == nullptr) {
+            return false;
+        }
+        auto* const cinematic_globals =
+            *reinterpret_cast<std::uint8_t**>(
+                tls + kCinematicGlobalsTlsOffset);
+        return cinematic_globals != nullptr &&
+               cinematic_globals[kCinematicInProgressOffset] != 0;
+#if defined(_MSC_VER)
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+#endif
+}
 
 struct StockCrosshairState {
     std::uint8_t* bank{};
@@ -1029,7 +1128,7 @@ bool valid_openxr_pose(const UEVR_TrackingPose& pose) {
                pose.rotation.w});
 }
 
-TrackingSnapshot capture_tracking_snapshot() {
+TrackingSnapshot capture_tracking_snapshot_raw() {
     TrackingSnapshot snapshot{};
 
     UEVR_LateTrackingSnapshot late{};
@@ -1192,6 +1291,64 @@ TrackingSnapshot capture_tracking_snapshot() {
     return snapshot;
 }
 
+halo_cevr::Pose to_core_pose(const Vec3& position, const Quat& rotation) {
+    return {
+        {position.x, position.y, position.z},
+        {rotation.x, rotation.y, rotation.z, rotation.w}};
+}
+
+void from_core_pose(const halo_cevr::Pose& pose, Vec3& position, Quat& rotation) {
+    position = {pose.position.x, pose.position.y, pose.position.z};
+    rotation = {
+        pose.rotation.x, pose.rotation.y,
+        pose.rotation.z, pose.rotation.w};
+}
+
+void apply_pose_offset(Vec3& position, Quat& rotation,
+                       const halo_cevr::PoseOffset& offset) {
+    const auto corrected = halo_cevr::apply_offset(
+        to_core_pose(position, rotation), offset);
+    from_core_pose(corrected, position, rotation);
+}
+
+void select_dominant_hand(TrackingSnapshot& snapshot) {
+    if (g_dominant_hand_left.load(std::memory_order_acquire)) {
+        const auto dominant_valid = snapshot.left_valid;
+        std::swap(snapshot.right_grip_position, snapshot.left_grip_position);
+        std::swap(snapshot.right_grip_rotation, snapshot.left_grip_rotation);
+        std::swap(snapshot.right_aim_position, snapshot.left_aim_position);
+        std::swap(snapshot.right_aim_rotation, snapshot.left_aim_rotation);
+        snapshot.left_valid = snapshot.valid;
+        snapshot.valid = dominant_valid;
+    }
+}
+
+void apply_tracking_calibration(TrackingSnapshot& snapshot) {
+    if (!snapshot.valid) {
+        return;
+    }
+
+    halo_cevr::PoseOffset controller{};
+    halo_cevr::PoseOffset weapon{};
+    {
+        const std::scoped_lock lock{g_calibration_mutex};
+        controller = g_controller_calibration;
+        weapon = g_weapon_calibration;
+    }
+    const auto total = halo_cevr::compose_offsets(controller, weapon);
+    apply_pose_offset(
+        snapshot.right_grip_position, snapshot.right_grip_rotation, total);
+    apply_pose_offset(
+        snapshot.right_aim_position, snapshot.right_aim_rotation, total);
+}
+
+TrackingSnapshot capture_tracking_snapshot() {
+    auto snapshot = capture_tracking_snapshot_raw();
+    select_dominant_hand(snapshot);
+    apply_tracking_calibration(snapshot);
+    return snapshot;
+}
+
 void publish_tracking_snapshot(const TrackingSnapshot& snapshot) {
     const std::scoped_lock lock{g_tracking_mutex};
     g_tracking_snapshot = snapshot;
@@ -1304,6 +1461,34 @@ void record_visual_pose_diagnostics(
     output.weapon = diagnostic(palette[8]);
     output.right_wrist = diagnostic(palette[19]);
     output.left_wrist = diagnostic(palette[25]);
+    output.right_index_curl =
+        g_visual_right_hand_curl[0].load(std::memory_order_relaxed);
+    output.right_grip_curl =
+        g_visual_right_hand_curl[1].load(std::memory_order_relaxed);
+    output.right_thumb_curl =
+        g_visual_right_hand_curl[2].load(std::memory_order_relaxed);
+    output.left_index_curl =
+        g_visual_left_hand_curl[0].load(std::memory_order_relaxed);
+    output.left_grip_curl =
+        g_visual_left_hand_curl[1].load(std::memory_order_relaxed);
+    output.left_thumb_curl =
+        g_visual_left_hand_curl[2].load(std::memory_order_relaxed);
+    output.right_index_tip_distance_blam =
+        g_right_index_tip_distance_blam.load(std::memory_order_relaxed);
+    output.left_index_tip_distance_blam =
+        g_left_index_tip_distance_blam.load(std::memory_order_relaxed);
+    output.final_xinput_left_x =
+        g_final_xinput_left_x.load(std::memory_order_relaxed);
+    output.final_xinput_left_y =
+        g_final_xinput_left_y.load(std::memory_order_relaxed);
+    output.final_xinput_right_x =
+        g_final_xinput_right_x.load(std::memory_order_relaxed);
+    output.final_xinput_right_y =
+        g_final_xinput_right_y.load(std::memory_order_relaxed);
+    output.final_xinput_buttons =
+        g_final_xinput_buttons.load(std::memory_order_relaxed);
+    output.xinput_callback_count =
+        g_xinput_callback_count.load(std::memory_order_relaxed);
     if (diagnostic_hand_geometry(
             palette,
             19,
@@ -1565,6 +1750,141 @@ bool reasonable_palette_matrix(const BlamMatrix4x3& matrix) {
            component_reasonable(matrix.up) &&
            length_squared(matrix.position) <=
                kMaximumPositionMagnitudeSquared;
+}
+
+halo_cevr::HandChannels physical_hand_curl(bool physical_left) {
+    const auto& input = physical_left
+        ? g_physical_left_input
+        : g_physical_right_input;
+    return {
+        std::clamp(input.trigger.load(std::memory_order_relaxed), 0.0f, 1.0f),
+        std::clamp(input.grip.load(std::memory_order_relaxed), 0.0f, 1.0f),
+        std::clamp(input.thumb.load(std::memory_order_relaxed), 0.0f, 1.0f)};
+}
+
+halo_cevr::HandChannels visual_hand_curl(bool visual_right_hand) {
+    const auto dominant_left =
+        g_dominant_hand_left.load(std::memory_order_relaxed);
+    return halo_cevr::visual_hand_channels(
+        physical_hand_curl(true), physical_hand_curl(false),
+        visual_right_hand, dominant_left,
+        g_two_hand_hold_latched.load(std::memory_order_relaxed));
+}
+
+bool rotate_finger_chain_about_joint(
+    BlamMatrix4x3* palette,
+    const std::array<std::uint8_t, 4>& chain,
+    std::size_t joint,
+    const Quat& rotation) {
+    if (palette == nullptr || joint >= chain.size()) {
+        return false;
+    }
+    const auto basis = rotation_basis(rotation);
+    if (!valid_basis(basis)) {
+        return false;
+    }
+    const auto pivot = palette[chain[joint]].position;
+    for (auto index = joint; index < chain.size(); ++index) {
+        auto& matrix = palette[chain[index]];
+        matrix.forward =
+            normalized(transform_vector(basis, matrix.forward));
+        matrix.left = normalized(transform_vector(basis, matrix.left));
+        matrix.up = normalized(transform_vector(basis, matrix.up));
+        matrix.position =
+            pivot + transform_vector(basis, matrix.position - pivot);
+    }
+    return true;
+}
+
+bool apply_finger_openness(
+    BlamMatrix4x3* palette,
+    std::uint8_t wrist,
+    const std::array<std::uint8_t, 4>& chain,
+    float curl) {
+    if (palette == nullptr) {
+        return false;
+    }
+    // Halo's stock palette is an authored closed weapon grip.  Build the
+    // open pose from its actual proportions: extend the digit away from the
+    // wrist through its first knuckle, then partially rotate each joint and
+    // all of its descendants toward that line.  This works for either hand
+    // and every shipped weapon without hard-coded Euler axes.
+    std::array<halo_cevr::Vector3, 4> positions{};
+    for (std::size_t index = 0; index < chain.size(); ++index) {
+        const auto position = palette[chain[index]].position;
+        positions[index] = {position.x, position.y, position.z};
+    }
+    const auto wrist_position = palette[wrist].position;
+    const auto solution = halo_cevr::solve_finger_opening(
+        {wrist_position.x, wrist_position.y, wrist_position.z},
+        positions, curl);
+    if (!solution.valid) {
+        return false;
+    }
+    for (std::size_t joint = 0;
+         joint < solution.joint_rotations.size(); ++joint) {
+        const auto core_rotation = solution.joint_rotations[joint];
+        const Quat rotation{
+            core_rotation.x, core_rotation.y,
+            core_rotation.z, core_rotation.w};
+        if (!rotate_finger_chain_about_joint(
+                palette, chain, joint, rotation)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool apply_hand_openness(
+    BlamMatrix4x3* palette,
+    bool visual_right_hand) {
+    if (!g_physical_hand_input_observed.load(std::memory_order_acquire)) {
+        return true;
+    }
+
+    // Baboon tag evidence from the shipped Spartan assault-rifle skeleton.
+    // Every Campaign Evolved first-person weapon uses this same 76-node
+    // topology; the validation script checks these parent chains.
+    constexpr std::array<std::uint8_t, 4> right_index{41, 53, 63, 73};
+    constexpr std::array<std::uint8_t, 4> right_middle{36, 49, 60, 70};
+    constexpr std::array<std::uint8_t, 4> right_ring{31, 44, 56, 66};
+    constexpr std::array<std::uint8_t, 4> right_pinky{43, 55, 65, 74};
+    constexpr std::array<std::uint8_t, 4> right_thumb{37, 48, 59, 69};
+    constexpr std::array<std::uint8_t, 4> left_index{28, 42, 54, 64};
+    constexpr std::array<std::uint8_t, 4> left_middle{33, 46, 57, 67};
+    constexpr std::array<std::uint8_t, 4> left_ring{38, 51, 61, 71};
+    constexpr std::array<std::uint8_t, 4> left_pinky{52, 62, 72, 75};
+    constexpr std::array<std::uint8_t, 4> left_thumb{32, 47, 58, 68};
+
+    const auto curl = visual_hand_curl(visual_right_hand);
+    const auto wrist = static_cast<std::uint8_t>(
+        visual_right_hand ? 19 : 25);
+    const auto& index = visual_right_hand ? right_index : left_index;
+    const auto& middle = visual_right_hand ? right_middle : left_middle;
+    const auto& ring = visual_right_hand ? right_ring : left_ring;
+    const auto& pinky = visual_right_hand ? right_pinky : left_pinky;
+    const auto& thumb = visual_right_hand ? right_thumb : left_thumb;
+    const auto applied =
+        apply_finger_openness(palette, wrist, index, curl.index) &&
+        apply_finger_openness(palette, wrist, middle, curl.grip) &&
+        apply_finger_openness(palette, wrist, ring, curl.grip) &&
+        apply_finger_openness(palette, wrist, pinky, curl.grip) &&
+        apply_finger_openness(palette, wrist, thumb, curl.thumb);
+    if (applied) {
+        auto& published = visual_right_hand
+            ? g_visual_right_hand_curl
+            : g_visual_left_hand_curl;
+        published[0].store(curl.index, std::memory_order_release);
+        published[1].store(curl.grip, std::memory_order_release);
+        published[2].store(curl.thumb, std::memory_order_release);
+        const auto tip_distance = std::sqrt(length_squared(
+            palette[index.back()].position - palette[wrist].position));
+        (visual_right_hand
+            ? g_right_index_tip_distance_blam
+            : g_left_index_tip_distance_blam)
+            .store(tip_distance, std::memory_order_release);
+    }
+    return applied;
 }
 
 void apply_rigid_delta(
@@ -2159,6 +2479,14 @@ bool apply_split_controllers_to_first_person_palette(
         }
     }
 
+    // Finger animation is deliberately last.  Wrist placement remains a
+    // rigid late-tracked transform, and the projectile/reticle path never
+    // reads finger nodes, so opening either hand cannot perturb weapon aim.
+    if (!apply_hand_openness(palette, true) ||
+        (tracking.left_valid && !apply_hand_openness(palette, false))) {
+        return false;
+    }
+
     for (std::uint8_t node = 5;
          node < static_cast<std::uint8_t>(kFirstPersonNodeCount);
          ++node) {
@@ -2398,7 +2726,9 @@ std::int16_t hook_get_markers(
     // While zoomed the stock crosshair is restored, so scoped shots keep
     // Halo's stock screen-center aim: skipping the marker rewrite leaves no
     // corrections for the projectile/sweep hooks to apply either.
-    if (!g_native_override_enabled.load(std::memory_order_relaxed) ||
+    if (!g_mod_enabled.load(std::memory_order_acquire) ||
+        g_cinematic_active.load(std::memory_order_acquire) ||
+        !g_native_override_enabled.load(std::memory_order_relaxed) ||
         g_local_zoomed.load(std::memory_order_acquire) ||
         g_local_fire_depth == 0 || return_address != g_primary_marker_return ||
         maximum_count != 64 || output == nullptr || count <= 0 ||
@@ -2487,6 +2817,8 @@ std::int64_t hook_projectile_new(ProjectileNewData* data) {
 
     const auto* return_address = _ReturnAddress();
     if (data != nullptr &&
+        g_mod_enabled.load(std::memory_order_acquire) &&
+        !g_cinematic_active.load(std::memory_order_acquire) &&
         g_native_override_enabled.load(std::memory_order_relaxed) &&
         g_local_fire_depth > 0 &&
         g_local_fire_marker_correction_count > 0 &&
@@ -2840,6 +3172,8 @@ std::int16_t hook_trigger_create_projectiles(
     const void* network_projectile_records,
     bool from_network) {
     const auto is_local =
+        g_mod_enabled.load(std::memory_order_acquire) &&
+        !g_cinematic_active.load(std::memory_order_acquire) &&
         !from_network &&
         static_cast<std::int32_t>(weapon_object_index) ==
         g_local_weapon_index.load(std::memory_order_acquire);
@@ -2904,7 +3238,9 @@ void hook_first_person_weapon_build(
                 : 0);
     }
 
-    if (!g_native_visual_hook_installed.load(std::memory_order_relaxed) ||
+    if (!g_mod_enabled.load(std::memory_order_acquire) ||
+        g_cinematic_active.load(std::memory_order_acquire) ||
+        !g_native_visual_hook_installed.load(std::memory_order_relaxed) ||
         g_simulation_module == nullptr || local_player < 0 ||
         local_player > 3 || weapon_slot < 0 || weapon_slot > 1) {
         return;
@@ -3555,6 +3891,18 @@ extern "C" __declspec(dllexport) bool HaloCEVR_GetStatus(
     if (g_two_hand_hold_latched.load(std::memory_order_acquire)) {
         flags |= kStatusTwoHandHoldActive;
     }
+    if (g_mod_enabled.load(std::memory_order_acquire)) {
+        flags |= kStatusModEnabled;
+    }
+    if (g_cinematic_active.load(std::memory_order_acquire)) {
+        flags |= kStatusCinematicActive;
+    }
+    if (g_dominant_hand_left.load(std::memory_order_acquire)) {
+        flags |= kStatusDominantHandLeft;
+    }
+    if (g_logical_aim_follower_enabled.load(std::memory_order_acquire)) {
+        flags |= kStatusLogicalAimFollower;
+    }
 
     const HaloCEVR_RuntimeStatus snapshot{
         .size = sizeof(HaloCEVR_RuntimeStatus),
@@ -3593,6 +3941,20 @@ extern "C" __declspec(dllexport) bool HaloCEVR_GetPoseDiagnostics(
 
 class HaloCEMotionControls final : public Plugin {
 public:
+    static void publish_final_xinput(const XINPUT_STATE& state) {
+        g_final_xinput_left_x.store(
+            state.Gamepad.sThumbLX, std::memory_order_release);
+        g_final_xinput_left_y.store(
+            state.Gamepad.sThumbLY, std::memory_order_release);
+        g_final_xinput_right_x.store(
+            state.Gamepad.sThumbRX, std::memory_order_release);
+        g_final_xinput_right_y.store(
+            state.Gamepad.sThumbRY, std::memory_order_release);
+        g_final_xinput_buttons.store(
+            state.Gamepad.wButtons, std::memory_order_release);
+        g_xinput_callback_count.fetch_add(1, std::memory_order_acq_rel);
+    }
+
     void on_initialize() override {
         auto& api = API::get();
         if (api == nullptr) {
@@ -3607,6 +3969,11 @@ public:
         }
 
         m_armed = true;
+        if (!m_config_store.initialize()) {
+            api->log_error(
+                "HaloCEMotionControls: live configuration could not be "
+                "initialized; safe built-in defaults remain active");
+        }
         std::array<wchar_t, 16> arm_ik_setting{};
         auto arm_ik_setting_length = GetEnvironmentVariableW(
             L"UEVR_HALO_ARM_IK",
@@ -3642,6 +4009,7 @@ public:
                 first != L'n' && first != L'o',
                 std::memory_order_release);
         }
+        apply_configuration(true);
         const auto marker = reticle_active_marker_path();
         if (!marker.empty()) {
             DeleteFileW(marker.c_str());
@@ -3660,6 +4028,7 @@ public:
         API::VR::set_aim_method(API::VR::AimMethod::GAME);
         API::VR::set_decoupled_pitch_enabled(false);
         API::VR::set_mod_value("VR_DecoupledPitchUIAdjust", false);
+        API::VR::set_mod_value("VR_SwapControllerInputs", false);
         api->log_info(
             "HaloCEMotionControls: armed; visual weapon and native Blam "
             "muzzle are owned by the right controller; arm mode=%s; "
@@ -3675,11 +4044,19 @@ public:
             return;
         }
 
+        refresh_configuration(delta);
+        update_kill_switch();
+
         // UEVR loads the per-game config after external plugins initialize.
         // Keep the requested mode authoritative on every launch.
         API::VR::set_aim_method(API::VR::AimMethod::GAME);
         API::VR::set_decoupled_pitch_enabled(false);
         API::VR::set_mod_value("VR_DecoupledPitchUIAdjust", false);
+        // Halo's dominant_hand setting owns semantic hand selection.  UEVR's
+        // global swap would otherwise swap physical indices first and Halo
+        // would swap them again, returning a left-dominant profile to the
+        // physical right controller.
+        API::VR::set_mod_value("VR_SwapControllerInputs", false);
 
         if (engine == nullptr) {
             return;
@@ -3690,7 +4067,56 @@ public:
             return;
         }
 
+        const auto cinematic = halo_cinematic_in_progress();
+        const auto previous_cinematic = g_cinematic_active.exchange(
+            cinematic, std::memory_order_acq_rel);
+        if (cinematic != previous_cinematic) {
+            API::get()->log_info(
+                cinematic
+                    ? "HaloCEMotionControls: native cinematic state entered; "
+                      "weapon, reticle, IK and fire overrides are suspended"
+                    : "HaloCEMotionControls: native cinematic state exited; "
+                      "gameplay overrides will reacquire on the next valid weapon");
+        }
+
+        // A level transition can invalidate the old pawn's WidgetComponent
+        // and render target before the 4 Hz discovery pass runs.  The reticle
+        // transform and compositor publisher execute every tick, so validate
+        // their owner first and drop every cached UObject/texture handle as
+        // soon as the pawn changes.  Publishing a stale render-target handle
+        // can otherwise race D3D12 PSO creation and surface later as a driver
+        // heap double-free.
+        synchronize_world_reticle_owner();
+
+        const auto suspended =
+            !g_mod_enabled.load(std::memory_order_acquire) ||
+            (cinematic &&
+             g_cutscene_comfort_enabled.load(std::memory_order_acquire));
+        if (suspended) {
+            publish_tracking_snapshot({});
+            publish_gameplay_ready(false);
+            publish_reticle_hide(true);
+            g_local_weapon_index.store(
+                kInvalidBlamObjectIndex, std::memory_order_release);
+            g_two_hand_hold_latched.store(false, std::memory_order_release);
+            g_two_hand_hold_blend.store(0.0f, std::memory_order_release);
+            if (m_screen_reticle_suppressed &&
+                m_screen_reticle_image != nullptr) {
+                set_reticle_image_opacity(m_screen_reticle_image, 1.0f);
+                m_screen_reticle_suppressed = false;
+            }
+            if (m_world_reticle_component != nullptr) {
+                m_world_reticle_component->set_bool_property(
+                    L"bHiddenInGame", true);
+            }
+            clear_openxr_reticle_quad(true);
+            maintain_stock_crosshair();
+            return;
+        }
+
         update_tracking_snapshot();
+        update_physical_hand_input(delta);
+        update_logical_aim_follower();
         update_two_hand_hold(delta);
         update_world_reticle_transform();
         update_openxr_reticle_quad();
@@ -3750,15 +4176,46 @@ public:
             return;
         }
 
-        // UEVR maps the left grip to LEFT_SHOULDER, which Halo binds to
-        // grenade throw. While the support hand is holding the two-handed
+        // Capture physical states before the support-grip grenade mask or any
+        // locomotion remapping changes the emulated gamepad.  Trigger remains
+        // proportional when the Operator analog extension is present and is
+        // still a correct 0/1 signal on stock UEVR.
+        g_physical_left_input.trigger_target.store(
+            static_cast<float>(state->Gamepad.bLeftTrigger) / 255.0f,
+            std::memory_order_release);
+        g_physical_right_input.trigger_target.store(
+            static_cast<float>(state->Gamepad.bRightTrigger) / 255.0f,
+            std::memory_order_release);
+        g_physical_left_input.grip_target.store(
+            (state->Gamepad.wButtons & XINPUT_GAMEPAD_LEFT_SHOULDER) != 0
+                ? 1.0f : 0.0f,
+            std::memory_order_release);
+        g_physical_right_input.grip_target.store(
+            (state->Gamepad.wButtons & XINPUT_GAMEPAD_RIGHT_SHOULDER) != 0
+                ? 1.0f : 0.0f,
+            std::memory_order_release);
+        g_physical_hand_input_observed.store(true, std::memory_order_release);
+
+        if (!g_mod_enabled.load(std::memory_order_acquire) ||
+            g_cinematic_active.load(std::memory_order_acquire)) {
+            publish_final_xinput(*state);
+            return;
+        }
+
+        const auto dominant_left =
+            g_dominant_hand_left.load(std::memory_order_relaxed);
+
+        // UEVR maps grip to the matching shoulder button, which Halo binds to
+        // grenade throw. While the non-dominant hand is holding the two-handed
         // grip, or is primed inside the barrel zone, swallow that button so
         // acquiring or holding the weapon never throws a grenade.
         if (g_two_hand_hold_enabled.load(std::memory_order_relaxed) &&
             (g_two_hand_hold_latched.load(std::memory_order_relaxed) ||
              g_two_hand_zone_active.load(std::memory_order_relaxed))) {
-            state->Gamepad.wButtons &=
-                static_cast<WORD>(~XINPUT_GAMEPAD_LEFT_SHOULDER);
+            const WORD support_grip = dominant_left
+                ? XINPUT_GAMEPAD_RIGHT_SHOULDER
+                : XINPUT_GAMEPAD_LEFT_SHOULDER;
+            state->Gamepad.wButtons &= static_cast<WORD>(~support_grip);
         }
 
         constexpr WORD dpad_mask =
@@ -3766,70 +4223,421 @@ public:
             XINPUT_GAMEPAD_DPAD_DOWN |
             XINPUT_GAMEPAD_DPAD_LEFT |
             XINPUT_GAMEPAD_DPAD_RIGHT;
-        if ((state->Gamepad.wButtons & dpad_mask) != 0) {
-            // UEVR's d-pad shifting deliberately converts a stick gesture
-            // into buttons and clears that stick before plugin callbacks run.
-            // Do not re-inject analog movement on top of the shifted buttons.
-            return;
+
+        const auto in_menu =
+            g_game_paused.load(std::memory_order_acquire) ||
+            g_gameplay_ready_published.load(std::memory_order_acquire) != 1;
+        const auto right_y =
+            static_cast<float>(state->Gamepad.sThumbRY) / 32767.0f;
+        if (in_menu &&
+            g_menu_button_is_back.load(std::memory_order_relaxed) &&
+            (state->Gamepad.wButtons & XINPUT_GAMEPAD_X) != 0) {
+            state->Gamepad.wButtons &=
+                static_cast<WORD>(~XINPUT_GAMEPAD_X);
+            state->Gamepad.wButtons |= XINPUT_GAMEPAD_B;
+            ++state->dwPacketNumber;
+        } else if (!in_menu &&
+                   g_crouch_on_right_stick_down.load(
+                       std::memory_order_relaxed) &&
+                   right_y < -0.7f) {
+            state->Gamepad.wButtons |= XINPUT_GAMEPAD_LEFT_THUMB;
+            ++state->dwPacketNumber;
         }
 
-        const auto source = API::VR::get_left_joystick_source();
-        const auto raw_axis = API::VR::get_joystick_axis(source);
-        if (!std::isfinite(raw_axis.x) || !std::isfinite(raw_axis.y)) {
-            return;
-        }
-        if (std::abs(raw_axis.x) <= 0.001f &&
-            std::abs(raw_axis.y) <= 0.001f &&
-            (state->Gamepad.sThumbLX != 0 ||
-             state->Gamepad.sThumbLY != 0)) {
-            // A real gamepad already supplied movement and the OpenXR action
-            // is idle. Do not erase that physical input.
-            return;
-        }
-
-        // UEVR's generic mapping can return a zero XInput stick for interaction
-        // profiles it does not recognize even though the OpenXR action itself
-        // is valid. Feed the left OpenXR stick into Halo's normal XInput path;
-        // this preserves keyboard/gamepad movement and needs no Blam memory
-        // write or build-specific movement offset.
-        constexpr float deadzone = 0.12f;
-        const auto apply_deadzone = [](float value) {
-            const auto magnitude = std::abs(value);
-            if (magnitude <= deadzone) {
-                return 0.0f;
+        if (!in_menu &&
+            g_dpad_shift_enabled.load(std::memory_order_relaxed) &&
+            right_y > g_dpad_deadzone.load(std::memory_order_relaxed) &&
+            (state->Gamepad.wButtons & dpad_mask) == 0) {
+            const auto left_x =
+                static_cast<float>(state->Gamepad.sThumbLX) / 32767.0f;
+            const auto left_y =
+                static_cast<float>(state->Gamepad.sThumbLY) / 32767.0f;
+            const auto deadzone =
+                g_dpad_deadzone.load(std::memory_order_relaxed);
+            if (std::abs(left_y) >= std::abs(left_x)) {
+                if (left_y > deadzone) {
+                    state->Gamepad.wButtons |= XINPUT_GAMEPAD_DPAD_UP;
+                } else if (left_y < -deadzone) {
+                    state->Gamepad.wButtons |= XINPUT_GAMEPAD_DPAD_DOWN;
+                }
+            } else if (left_x > deadzone) {
+                state->Gamepad.wButtons |= XINPUT_GAMEPAD_DPAD_RIGHT;
+            } else if (left_x < -deadzone) {
+                state->Gamepad.wButtons |= XINPUT_GAMEPAD_DPAD_LEFT;
             }
-            const auto remapped =
-                (magnitude - deadzone) / (1.0f - deadzone);
-            return std::copysign(std::min(remapped, 1.0f), value);
-        };
-        const auto x = apply_deadzone(
-            std::clamp(raw_axis.x, -1.0f, 1.0f));
-        const auto y = apply_deadzone(
-            std::clamp(raw_axis.y, -1.0f, 1.0f));
-        state->Gamepad.sThumbLX =
-            static_cast<SHORT>(std::lround(x * 32767.0f));
-        state->Gamepad.sThumbLY =
-            static_cast<SHORT>(std::lround(y * 32767.0f));
-        *retval = ERROR_SUCCESS;
-        if (x == 0.0f && y == 0.0f) {
+            state->Gamepad.sThumbLX = 0;
+            state->Gamepad.sThumbLY = 0;
+            ++state->dwPacketNumber;
+        }
+
+        if ((state->Gamepad.wButtons & dpad_mask) != 0) {
+            // UEVR or the modifier above deliberately converted the stick into
+            // buttons. Never layer analog locomotion over a menu/select input.
+            publish_final_xinput(*state);
             return;
         }
 
-        const auto first_locomotion_callback =
-            !g_locomotion_bridge_observed.exchange(
-                true,
-            std::memory_order_release);
-
-        if (first_locomotion_callback) {
-            API::get()->log_info(
-                "HaloCEMotionControls: left OpenXR thumbstick is bridged "
-                "to Halo XInput locomotion");
+        bool movement_present =
+            state->Gamepad.sThumbLX != 0 || state->Gamepad.sThumbLY != 0;
+        if (!movement_present) {
+            const auto source = dominant_left
+                ? API::VR::get_right_joystick_source()
+                : API::VR::get_left_joystick_source();
+        const auto raw_axis = API::VR::get_joystick_axis(source);
+            if (std::isfinite(raw_axis.x) && std::isfinite(raw_axis.y)) {
+                auto movement = halo_cevr::radial_deadzone(
+                    {raw_axis.x, raw_axis.y},
+                    g_movement_deadzone.load(std::memory_order_relaxed));
+                if (g_head_relative_movement.load(std::memory_order_relaxed) &&
+                    (movement.x != 0.0f || movement.y != 0.0f)) {
+                    const auto hmd_index = API::VR::get_hmd_index();
+                    if (hmd_index >= 0 && hmd_index < 64) {
+                        const auto hmd = API::VR::get_pose(hmd_index);
+                        const auto offset = API::VR::get_rotation_offset();
+                        const halo_cevr::Quaternion q_offset{
+                            offset.x, offset.y, offset.z, offset.w};
+                        const halo_cevr::Quaternion q_hmd{
+                            hmd.rotation.x, hmd.rotation.y,
+                            hmd.rotation.z, hmd.rotation.w};
+                        const auto forward = halo_cevr::rotate(
+                            q_offset * q_hmd, {0.0f, 0.0f, 1.0f});
+                        const auto yaw = std::atan2(forward.x, forward.z) *
+                            (180.0f / 3.14159265358979323846f);
+                        movement = halo_cevr::rotate_stick(movement, yaw);
+                    }
+                }
+                state->Gamepad.sThumbLX = static_cast<SHORT>(std::lround(
+                    std::clamp(movement.x, -1.0f, 1.0f) * 32767.0f));
+                state->Gamepad.sThumbLY = static_cast<SHORT>(std::lround(
+                    std::clamp(movement.y, -1.0f, 1.0f) * 32767.0f));
+                movement_present =
+                    state->Gamepad.sThumbLX != 0 ||
+                    state->Gamepad.sThumbLY != 0;
+                if (movement_present) {
+                    *retval = ERROR_SUCCESS;
+                    ++state->dwPacketNumber;
+                }
+            }
         }
+
+        if (movement_present &&
+            !g_locomotion_bridge_observed.exchange(
+                true, std::memory_order_acq_rel)) {
+            API::get()->log_info(
+                "HaloCEMotionControls: locomotion reached Halo XInput; "
+                "existing UEVR/gamepad output is preserved, raw OpenXR is "
+                "used only as a zero-state fallback");
+        }
+
+        if (!in_menu &&
+            g_logical_aim_follower_enabled.load(std::memory_order_relaxed)) {
+            state->Gamepad.sThumbRX = static_cast<SHORT>(std::lround(
+                std::clamp(g_logical_aim_x.load(std::memory_order_relaxed),
+                           -1.0f, 1.0f) * 32767.0f));
+            state->Gamepad.sThumbRY = static_cast<SHORT>(std::lround(
+                std::clamp(g_logical_aim_y.load(std::memory_order_relaxed),
+                           -1.0f, 1.0f) * 32767.0f));
+            ++state->dwPacketNumber;
+        }
+        publish_final_xinput(*state);
     }
 
 private:
+    enum class CalibrationMode { None, Controller, Weapon };
+
+    void apply_configuration(bool log_state) {
+        const auto& config = m_config_store.runtime();
+        const auto session_allowed = m_session_enabled_override.value_or(true);
+        const auto enabled = config.enabled && session_allowed;
+        g_mod_enabled.store(enabled, std::memory_order_release);
+        g_two_hand_ik_enabled.store(
+            !config.floating_hands, std::memory_order_release);
+        g_two_hand_hold_enabled.store(
+            config.two_hand_hold, std::memory_order_release);
+        g_dominant_hand_left.store(
+            config.dominant_hand == halo_cevr::DominantHand::Left,
+            std::memory_order_release);
+        g_head_relative_movement.store(
+            config.head_relative_movement, std::memory_order_release);
+        g_movement_deadzone.store(
+            config.movement_deadzone, std::memory_order_release);
+        g_dpad_shift_enabled.store(config.dpad_shift, std::memory_order_release);
+        g_dpad_deadzone.store(config.dpad_deadzone, std::memory_order_release);
+        g_crouch_on_right_stick_down.store(
+            config.right_stick_down_crouch, std::memory_order_release);
+        g_menu_button_is_back.store(
+            config.menu_button_is_back, std::memory_order_release);
+        g_cutscene_comfort_enabled.store(
+            config.cutscene_comfort, std::memory_order_release);
+        g_logical_aim_follower_enabled.store(
+            config.logical_aim_follower, std::memory_order_release);
+        g_reticle_distance_meters.store(
+            config.reticle_distance_meters, std::memory_order_release);
+        g_reticle_extent_meters.store(
+            config.reticle_extent_meters, std::memory_order_release);
+
+        {
+            const std::scoped_lock lock{g_calibration_mutex};
+            g_controller_calibration = m_config_store.calibration().controller;
+            g_weapon_calibration =
+                m_config_store.weapon_calibration(m_current_weapon_key);
+        }
+
+        const auto snap_turn = enabled &&
+            config.turn_mode == halo_cevr::TurnMode::Snap;
+        API::VR::set_snap_turn_enabled(snap_turn);
+        API::VR::set_mod_value(
+            "VR_SnapturnTurnAngle",
+            static_cast<int>(std::lround(config.snap_turn_degrees)));
+        API::VR::set_mod_value(
+            "VR_SnapturnJoystickDeadzone", config.turn_deadzone);
+        // UEVR filters controller axes before the plugin's XInput callback.
+        // Keep that upstream threshold synchronized with Halo's configured
+        // movement deadzone so values just above the user's threshold are not
+        // discarded by UEVR's otherwise-higher 0.20 default.
+        API::VR::set_mod_value(
+            "VR_JoystickDeadzone", config.movement_deadzone);
+        API::VR::set_mod_value(
+            "VR_MovementOrientation",
+            config.head_relative_movement
+                ? static_cast<int>(API::VR::AimMethod::HEAD)
+                : static_cast<int>(API::VR::AimMethod::GAME));
+        API::VR::set_mod_value("VR_DPadShifting", config.dpad_shift);
+        API::VR::set_mod_value("VR_SwapControllerInputs", false);
+
+        if (log_state) {
+            API::get()->log_info(
+                "HaloCEMotionControls: config applied enabled=%d hands=%s "
+                "dominant=%s movement=%s turn=%s cutscene_comfort=%d "
+                "logical_aim=%d",
+                enabled ? 1 : 0,
+                config.floating_hands ? "floating" : "anchored IK",
+                config.dominant_hand == halo_cevr::DominantHand::Left
+                    ? "left" : "right",
+                config.head_relative_movement ? "head" : "game",
+                config.turn_mode == halo_cevr::TurnMode::Snap ? "snap"
+                    : config.turn_mode == halo_cevr::TurnMode::Smooth
+                        ? "smooth" : "off",
+                config.cutscene_comfort ? 1 : 0,
+                config.logical_aim_follower ? 1 : 0);
+            API::get()->log_info(
+                "HaloCEMotionControls: live config %ls; calibration %ls",
+                m_config_store.config_path().c_str(),
+                m_config_store.calibration_path().c_str());
+        }
+    }
+
+    void refresh_configuration(float delta) {
+        m_config_timer -= std::max(delta, 0.0f);
+        if (m_config_timer > 0.0f) {
+            return;
+        }
+        m_config_timer = 2.0f;
+        if (m_config_store.reload_if_changed()) {
+            apply_configuration(true);
+        }
+    }
+
+    void update_kill_switch() {
+        const auto key = m_config_store.runtime().kill_switch_key;
+        const auto down = key != 0 &&
+            (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0 &&
+            (GetAsyncKeyState(static_cast<int>(key)) & 0x8000) != 0;
+        if (down && !m_kill_switch_down) {
+            const auto currently_enabled =
+                g_mod_enabled.load(std::memory_order_acquire);
+            m_session_enabled_override = !currently_enabled;
+            apply_configuration(true);
+            if (!g_mod_enabled.load(std::memory_order_acquire)) {
+                publish_gameplay_ready(false);
+                publish_reticle_hide(true);
+                API::VR::clear_openxr_compositor_quad();
+            }
+        }
+        m_kill_switch_down = down;
+    }
+
+    void process_calibration(TrackingSnapshot& tracking) {
+        if (!tracking.valid) {
+            return;
+        }
+        const auto& config = m_config_store.runtime();
+        const auto controller_down = config.controller_calibration_key != 0 &&
+            (GetAsyncKeyState(
+                static_cast<int>(config.controller_calibration_key)) & 0x8000) != 0;
+        const auto weapon_down = config.weapon_calibration_key != 0 &&
+            (GetAsyncKeyState(
+                static_cast<int>(config.weapon_calibration_key)) & 0x8000) != 0;
+        const auto requested = controller_down
+            ? CalibrationMode::Controller
+            : weapon_down ? CalibrationMode::Weapon : CalibrationMode::None;
+
+        if (m_calibration_mode == CalibrationMode::None &&
+            requested != CalibrationMode::None) {
+            apply_tracking_calibration(tracking);
+            m_calibration_target = to_core_pose(
+                tracking.right_aim_position, tracking.right_aim_rotation);
+            m_calibration_mode = requested;
+            API::get()->log_info(
+                requested == CalibrationMode::Controller
+                    ? "HaloCEMotionControls: controller pose calibration "
+                      "started; weapon held at its frozen world pose"
+                    : "HaloCEMotionControls: per-weapon pose calibration "
+                      "started; weapon held at its frozen world pose");
+            return;
+        }
+
+        const auto still_down =
+            (m_calibration_mode == CalibrationMode::Controller && controller_down) ||
+            (m_calibration_mode == CalibrationMode::Weapon && weapon_down);
+        if (m_calibration_mode != CalibrationMode::None && still_down) {
+            const auto temporary = halo_cevr::solve_offset(
+                to_core_pose(
+                    tracking.right_aim_position, tracking.right_aim_rotation),
+                m_calibration_target);
+            apply_pose_offset(
+                tracking.right_grip_position,
+                tracking.right_grip_rotation,
+                temporary);
+            apply_pose_offset(
+                tracking.right_aim_position,
+                tracking.right_aim_rotation,
+                temporary);
+            return;
+        }
+
+        if (m_calibration_mode != CalibrationMode::None) {
+            auto& calibration = m_config_store.calibration();
+            const auto raw = to_core_pose(
+                tracking.right_aim_position, tracking.right_aim_rotation);
+            if (m_calibration_mode == CalibrationMode::Controller) {
+                const auto total = halo_cevr::solve_offset(
+                    raw, m_calibration_target);
+                const auto weapon =
+                    m_config_store.weapon_calibration(m_current_weapon_key);
+                calibration.controller = halo_cevr::compose_offsets(
+                    total, halo_cevr::inverse_offset(weapon));
+            } else if (!m_current_weapon_key.empty()) {
+                const auto after_controller = halo_cevr::apply_offset(
+                    raw, calibration.controller);
+                calibration.weapons[m_current_weapon_key] =
+                    halo_cevr::solve_offset(
+                        after_controller, m_calibration_target);
+            }
+            if (m_config_store.save_calibration()) {
+                API::get()->log_info(
+                    "HaloCEMotionControls: calibration saved for %s",
+                    m_calibration_mode == CalibrationMode::Controller
+                        ? "this controller/runtime" : m_current_weapon_key.c_str());
+            } else {
+                API::get()->log_error(
+                    "HaloCEMotionControls: calibration could not be saved");
+            }
+            m_calibration_mode = CalibrationMode::None;
+            apply_configuration(false);
+        }
+        apply_tracking_calibration(tracking);
+    }
+
     void update_tracking_snapshot() {
-        publish_tracking_snapshot(capture_tracking_snapshot());
+        auto tracking = capture_tracking_snapshot_raw();
+        select_dominant_hand(tracking);
+        process_calibration(tracking);
+        publish_tracking_snapshot(tracking);
+    }
+
+    void update_logical_aim_follower() {
+        if (!g_logical_aim_follower_enabled.load(
+                std::memory_order_acquire) ||
+            g_game_paused.load(std::memory_order_acquire)) {
+            g_logical_aim_x.store(0.0f, std::memory_order_release);
+            g_logical_aim_y.store(0.0f, std::memory_order_release);
+            m_logical_aim_reference_valid = false;
+            return;
+        }
+
+        TrackingSnapshot tracking{};
+        {
+            const std::scoped_lock lock{g_tracking_mutex};
+            tracking = g_tracking_snapshot;
+        }
+        auto* const controller = API::get()->get_player_controller(0);
+        if (!tracking.valid || controller == nullptr) {
+            g_logical_aim_x.store(0.0f, std::memory_order_release);
+            g_logical_aim_y.store(0.0f, std::memory_order_release);
+            m_logical_aim_reference_valid = false;
+            return;
+        }
+
+        UnrealRotator control_rotation{};
+        bool have_control_rotation = false;
+        if (auto* const property =
+                controller->get_property_data<UnrealRotator>(
+                    L"ControlRotation");
+            property != nullptr) {
+            control_rotation = *property;
+            have_control_rotation =
+                std::isfinite(control_rotation.pitch) &&
+                std::isfinite(control_rotation.yaw);
+        }
+        if (!have_control_rotation) {
+            auto* const function =
+                controller->get_class()->find_function(L"GetControlRotation");
+            if (function != nullptr) {
+                std::array<std::byte, 64> parameters{};
+                controller->process_event(function, parameters.data());
+                control_rotation = read_function_parameter<UnrealRotator>(
+                    function, parameters, L"ReturnValue");
+                have_control_rotation =
+                    std::isfinite(control_rotation.pitch) &&
+                    std::isfinite(control_rotation.yaw);
+            }
+        }
+        if (!have_control_rotation) {
+            return;
+        }
+
+        const auto forward = rotate(
+            normalized(tracking.right_aim_rotation),
+            Vec3{0.0f, 0.0f, -1.0f});
+        constexpr float degrees_per_radian =
+            180.0f / 3.14159265358979323846f;
+        const auto tracked_yaw =
+            std::atan2(forward.x, -forward.z) * degrees_per_radian;
+        const auto tracked_pitch =
+            std::atan2(forward.y, std::hypot(forward.x, forward.z)) *
+            degrees_per_radian;
+        if (!m_logical_aim_reference_valid) {
+            m_logical_aim_yaw_offset = halo_cevr::signed_angle_degrees(
+                tracked_yaw, static_cast<float>(control_rotation.yaw));
+            m_logical_aim_pitch_offset =
+                static_cast<float>(control_rotation.pitch) - tracked_pitch;
+            m_logical_aim_reference_valid = true;
+        }
+
+        const auto target_yaw = halo_cevr::wrap_degrees(
+            tracked_yaw + m_logical_aim_yaw_offset);
+        const auto target_pitch = std::clamp(
+            tracked_pitch + m_logical_aim_pitch_offset, -89.0f, 89.0f);
+        const auto yaw_error = halo_cevr::signed_angle_degrees(
+            static_cast<float>(control_rotation.yaw), target_yaw);
+        const auto pitch_error = target_pitch -
+            static_cast<float>(control_rotation.pitch);
+        const auto& config = m_config_store.runtime();
+        g_logical_aim_x.store(
+            halo_cevr::shaped_aim_axis(
+                yaw_error,
+                config.logical_aim_deadzone_degrees,
+                config.logical_aim_full_scale_degrees,
+                config.logical_aim_minimum_output),
+            std::memory_order_release);
+        g_logical_aim_y.store(
+            halo_cevr::shaped_aim_axis(
+                pitch_error,
+                config.logical_aim_deadzone_degrees,
+                config.logical_aim_full_scale_degrees,
+                config.logical_aim_minimum_output),
+            std::memory_order_release);
     }
 
     static bool has_outer(
@@ -4458,9 +5266,20 @@ private:
             L"ReturnValue");
     }
 
-    void reset_world_reticle_cache(API::UObject* owner) {
-        clear_openxr_reticle_quad(true);
-        restore_world_reticle_depth_test();
+    void reset_world_reticle_cache(
+        API::UObject* owner,
+        bool prior_objects_may_be_stale = false) {
+        // Never call a method on the previous component after its owning pawn
+        // has changed.  Clearing the native compositor layer is sufficient;
+        // the outgoing world is responsible for destroying its component.
+        clear_openxr_reticle_quad(!prior_objects_may_be_stale);
+        if (prior_objects_may_be_stale) {
+            m_world_reticle_main_pass_disabled = false;
+            m_world_reticle_depth_override_active = false;
+            m_world_reticle_base_material = nullptr;
+        } else {
+            restore_world_reticle_depth_test();
+        }
         if (m_world_reticle_widget_rooted) {
             set_uobject_rooted(m_world_reticle_widget, false);
         }
@@ -4476,6 +5295,13 @@ private:
         m_screen_reticle_image = nullptr;
         m_screen_reticle_suppressed = false;
         m_shared_reticle_material = nullptr;
+    }
+
+    void synchronize_world_reticle_owner() {
+        auto* const owner = API::get()->get_local_pawn(0);
+        if (owner != m_reticle_owner) {
+            reset_world_reticle_cache(owner, true);
+        }
     }
 
     bool set_world_reticle_main_pass(bool enabled) {
@@ -4534,11 +5360,13 @@ private:
         auto* const owner = api->get_local_pawn(0);
         auto* const player_controller = api->get_player_controller(0);
         if (owner == nullptr || player_controller == nullptr) {
-            reset_world_reticle_cache(nullptr);
+            if (owner != m_reticle_owner || m_world_reticle_component != nullptr) {
+                reset_world_reticle_cache(nullptr, true);
+            }
             return;
         }
         if (owner != m_reticle_owner) {
-            reset_world_reticle_cache(owner);
+            reset_world_reticle_cache(owner, true);
         }
 
         auto* const widget_component_class =
@@ -4771,32 +5599,27 @@ private:
         }
     }
 
-    void update_world_reticle_transform() {
-        if (m_world_reticle_component == nullptr ||
-            m_world_reticle_widget == nullptr) {
-            return;
-        }
-
+    std::optional<ControllerWorldRay> get_controller_world_ray() {
         TrackingSnapshot tracking{};
         {
             const std::scoped_lock lock{g_tracking_mutex};
             tracking = g_tracking_snapshot;
         }
         if (!tracking.valid) {
-            return;
+            return std::nullopt;
         }
 
         auto* const player_controller =
             API::get()->get_player_controller(0);
         if (player_controller == nullptr) {
-            return;
+            return std::nullopt;
         }
         auto* const function =
             player_controller->get_class()->find_function(
                 L"GetPlayerViewPoint");
         std::array<std::byte, 128> viewpoint_parameters{};
         if (function == nullptr) {
-            return;
+            return std::nullopt;
         }
         player_controller->process_event(
             function,
@@ -4821,7 +5644,7 @@ private:
             conjugate(hmd_rotation),
             aim_relative);
         if (!valid_basis(controller_basis)) {
-            return;
+            return std::nullopt;
         }
 
         // Blam basis is +X forward, +Y left, +Z up. Unreal camera-local is
@@ -4861,7 +5684,36 @@ private:
             camera_forward.z * local_direction.x +
                 camera_right.z * local_direction.y +
                 camera_up.z * local_direction.z};
-        constexpr double reticle_distance_centimeters = 1000.0;
+        const auto length = std::sqrt(
+            direction.x * direction.x +
+            direction.y * direction.y +
+            direction.z * direction.z);
+        if (!std::isfinite(length) || length < 0.000001) {
+            return std::nullopt;
+        }
+        return ControllerWorldRay{
+            view_location,
+            UnrealVector{
+                direction.x / length,
+                direction.y / length,
+                direction.z / length}};
+    }
+
+    void update_world_reticle_transform() {
+        if (m_world_reticle_component == nullptr ||
+            m_world_reticle_widget == nullptr) {
+            return;
+        }
+        const auto ray = get_controller_world_ray();
+        if (!ray.has_value()) {
+            return;
+        }
+
+        const auto& view_location = ray->origin;
+        const auto& direction = ray->direction;
+        const auto reticle_distance_centimeters =
+            static_cast<double>(g_reticle_distance_meters.load(
+                std::memory_order_relaxed)) * 100.0;
         const UnrealVector target{
             view_location.x + direction.x * reticle_distance_centimeters,
             view_location.y + direction.y * reticle_distance_centimeters,
@@ -4906,6 +5758,8 @@ private:
 
     void update_openxr_reticle_quad() {
         const bool visible =
+            g_mod_enabled.load(std::memory_order_acquire) &&
+            !g_cinematic_active.load(std::memory_order_acquire) &&
             API::VR::is_openxr() &&
             g_replacement_reticle_active.load(std::memory_order_acquire) &&
             !g_two_hand_hold_latched.load(std::memory_order_acquire) &&
@@ -4955,8 +5809,10 @@ private:
             return;
         }
 
-        constexpr float reticle_distance_meters = 10.0f;
-        constexpr float reticle_texture_extent_meters = 2.5f;
+        const auto reticle_distance_meters =
+            g_reticle_distance_meters.load(std::memory_order_relaxed);
+        const auto reticle_texture_extent_meters =
+            g_reticle_extent_meters.load(std::memory_order_relaxed);
         const auto target =
             tracking.hmd_position + stage_direction * reticle_distance_meters;
         // An OpenXR quad's authored front face is +Z. Rotate that normal back
@@ -4996,6 +5852,127 @@ private:
             API::get()->log_info(
                 "HaloCEMotionControls: dedicated OpenXR reticle quad active; "
                 "world WidgetComponent geometry removed from the main pass");
+        }
+    }
+
+    static void update_smoothed_hand(
+        PhysicalHandInputState& input,
+        float delta) {
+        input.trigger.store(
+            halo_cevr::smooth_hand_channel(
+                input.trigger.load(std::memory_order_relaxed),
+                input.trigger_target.load(std::memory_order_relaxed),
+                delta),
+            std::memory_order_release);
+        input.grip.store(
+            halo_cevr::smooth_hand_channel(
+                input.grip.load(std::memory_order_relaxed),
+                input.grip_target.load(std::memory_order_relaxed),
+                delta),
+            std::memory_order_release);
+        input.thumb.store(
+            halo_cevr::smooth_hand_channel(
+                input.thumb.load(std::memory_order_relaxed),
+                input.thumb_target.load(std::memory_order_relaxed),
+                delta),
+            std::memory_order_release);
+    }
+
+    void update_physical_hand_input(float delta) {
+        // Retry lookups until OpenXR creates the action set.  Thumb touch is
+        // independent of grip, matching the SN2 hand-animation model; A/B
+        // touch also counts because many Touch controllers expose the thumb
+        // there instead of on the rest sensor.
+        static UEVR_ActionHandle trigger_value = nullptr;
+        static UEVR_ActionHandle squeeze_value = nullptr;
+        static UEVR_ActionHandle left_thumbrest = nullptr;
+        static UEVR_ActionHandle right_thumbrest = nullptr;
+        static UEVR_ActionHandle left_a_touch = nullptr;
+        static UEVR_ActionHandle left_b_touch = nullptr;
+        static UEVR_ActionHandle right_a_touch = nullptr;
+        static UEVR_ActionHandle right_b_touch = nullptr;
+        const auto resolve = [](UEVR_ActionHandle& handle, const char* path) {
+            // OpenXR creates its final action set after the plugin can begin
+            // receiving callbacks. A non-null handle obtained during that
+            // bootstrap window can therefore become stale when the runtime
+            // rebuilds the set. Resolve from UEVR's current action map every
+            // update; this is a cheap lookup and also survives session
+            // recreation without requiring an exposed action-set generation.
+            handle = API::VR::get_action_handle(path);
+        };
+        resolve(trigger_value, "/actions/default/in/TriggerValue");
+        resolve(squeeze_value, "/actions/default/in/Squeeze");
+        resolve(left_thumbrest, "/actions/default/in/ThumbrestTouchLeft");
+        resolve(right_thumbrest, "/actions/default/in/ThumbrestTouchRight");
+        resolve(left_a_touch, "/actions/default/in/AButtonTouchLeft");
+        resolve(left_b_touch, "/actions/default/in/BButtonTouchLeft");
+        resolve(right_a_touch, "/actions/default/in/AButtonTouchRight");
+        resolve(right_b_touch, "/actions/default/in/BButtonTouchRight");
+
+        const auto active = [](UEVR_ActionHandle handle,
+                               UEVR_InputSourceHandle source) {
+            return handle != nullptr &&
+                   API::VR::is_action_active(handle, source);
+        };
+        const auto left_source = API::VR::get_left_joystick_source();
+        const auto right_source = API::VR::get_right_joystick_source();
+        // In UEVR's OpenXR backend the input-source handle is the Hand enum:
+        // LEFT is the valid value zero and therefore compares equal to a null
+        // pointer. Do not use pointer-null tests for these opaque handles.
+        if (trigger_value != nullptr && squeeze_value != nullptr) {
+            // API 2.43 reads OpenXR vector1 actions through an out parameter.
+            // This keeps the scalar on one stable C ABI path across MSVC
+            // plugin boundaries (API 2.42's direct float return is retained
+            // by UEVR only for binary compatibility).
+            const auto scalar = [](UEVR_ActionHandle action,
+                                   UEVR_InputSourceHandle source) {
+                float value{};
+                if (!API::VR::get_action_float_value(
+                        action, source, value)) {
+                    return 0.0f;
+                }
+                return std::clamp(value, 0.0f, 1.0f);
+            };
+            // The backend deliberately falls back to existing boolean
+            // Trigger/Grip actions as 0/1 for controller profiles without
+            // value paths.
+            g_physical_left_input.trigger_target.store(
+                scalar(trigger_value, left_source),
+                std::memory_order_release);
+            g_physical_right_input.trigger_target.store(
+                scalar(trigger_value, right_source),
+                std::memory_order_release);
+            g_physical_left_input.grip_target.store(
+                scalar(squeeze_value, left_source),
+                std::memory_order_release);
+            g_physical_right_input.grip_target.store(
+                scalar(squeeze_value, right_source),
+                std::memory_order_release);
+            g_physical_hand_input_observed.store(
+                true, std::memory_order_release);
+        }
+        const auto left_thumb =
+            active(left_thumbrest, left_source) ||
+            active(left_a_touch, left_source) ||
+            active(left_b_touch, left_source);
+        const auto right_thumb =
+            active(right_thumbrest, right_source) ||
+            active(right_a_touch, right_source) ||
+            active(right_b_touch, right_source);
+        g_physical_left_input.thumb_target.store(
+            left_thumb ? 1.0f : 0.0f,
+            std::memory_order_release);
+        g_physical_right_input.thumb_target.store(
+            right_thumb ? 1.0f : 0.0f,
+            std::memory_order_release);
+
+        update_smoothed_hand(g_physical_left_input, delta);
+        update_smoothed_hand(g_physical_right_input, delta);
+        if (!g_physical_hand_input_logged.exchange(
+                true, std::memory_order_acq_rel)) {
+            API::get()->log_info(
+                "HaloCEMotionControls: independent left/right finger input "
+                "active (trigger=index, grip=middle/ring/pinky, touch=thumb)");
         }
     }
 
@@ -5041,7 +6018,9 @@ private:
                 grip_action != nullptr &&
                 API::VR::is_action_active(
                     grip_action,
-                    API::VR::get_left_joystick_source());
+                    g_dominant_hand_left.load(std::memory_order_relaxed)
+                        ? API::VR::get_right_joystick_source()
+                        : API::VR::get_left_joystick_source());
 
             const auto was_latched = g_two_hand_hold_latched.load(
                 std::memory_order_relaxed);
@@ -5062,7 +6041,9 @@ private:
                 latched ? 0.12f : 0.06f,
                 0.0f,
                 latched ? 0.7f : 0.35f,
-                API::VR::get_left_joystick_source());
+                g_dominant_hand_left.load(std::memory_order_relaxed)
+                    ? API::VR::get_right_joystick_source()
+                    : API::VR::get_left_joystick_source());
         }
 
         // The floating ball is misleading both while two-handed (shots
@@ -5133,6 +6114,11 @@ private:
         update_game_paused(local_pawn);
 
         if (first_person_weapon == nullptr) {
+            if (!m_current_weapon_key.empty()) {
+                m_current_weapon_key.clear();
+                const std::scoped_lock lock{g_calibration_mutex};
+                g_weapon_calibration = {};
+            }
             g_local_weapon_index.store(
                 kInvalidBlamObjectIndex,
                 std::memory_order_release);
@@ -5140,6 +6126,17 @@ private:
             g_attached_component.store(0, std::memory_order_release);
             publish_gameplay_ready(false);
             return;
+        }
+
+        const auto weapon_class_name = first_person_weapon->get_class() != nullptr
+            ? first_person_weapon->get_class()->get_full_name()
+            : first_person_weapon->get_full_name();
+        const auto weapon_key = halo_cevr::stable_weapon_key(weapon_class_name);
+        if (weapon_key != m_current_weapon_key) {
+            m_current_weapon_key = weapon_key;
+            const std::scoped_lock lock{g_calibration_mutex};
+            g_weapon_calibration =
+                m_config_store.weapon_calibration(m_current_weapon_key);
         }
 
         auto weapon_index = get_blam_object_index(
@@ -5218,6 +6215,16 @@ private:
     }
 
     bool m_armed{};
+    halo_cevr::ConfigStore m_config_store{};
+    std::optional<bool> m_session_enabled_override{};
+    float m_config_timer{};
+    bool m_kill_switch_down{};
+    CalibrationMode m_calibration_mode{CalibrationMode::None};
+    halo_cevr::Pose m_calibration_target{};
+    std::string m_current_weapon_key{};
+    bool m_logical_aim_reference_valid{};
+    float m_logical_aim_yaw_offset{};
+    float m_logical_aim_pitch_offset{};
     bool m_native_hook_attempted{};
     bool m_native_hooks_installed{};
     float m_engine_uptime{};
