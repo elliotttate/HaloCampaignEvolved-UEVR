@@ -56,16 +56,45 @@ local marker_poll_frames = 0
 local gameplay_ready = false
 local replacement_hidden = false
 
+-- Some older LuaLoader builds predate the sandboxed `fs` table. Never crash
+-- merely because marker I/O is absent: the native projectile and tracking
+-- paths remain usable, and UObject discovery can continue. The formal release
+-- pins a current official UEVR build where these synchronization markers and
+-- add_component_by_class are both available.
+local filesystem = rawget(_G, "fs")
+local marker_reads_available =
+    type(filesystem) == "table" and type(filesystem.read) == "function"
+local marker_writes_available =
+    type(filesystem) == "table" and type(filesystem.write) == "function"
+
+local function read_marker(path, fallback)
+    if not marker_reads_available then
+        return fallback or ""
+    end
+    local ok, value = pcall(filesystem.read, path)
+    if not ok or value == nil then
+        return fallback or ""
+    end
+    return tostring(value)
+end
+
+local function write_marker(path, value)
+    if not marker_writes_available then
+        return false
+    end
+    return pcall(filesystem.write, path, value)
+end
+
 local function publish_diagnostic(message)
-    fs.write(diagnostic_path, tostring(message) .. "\n")
+    write_marker(diagnostic_path, tostring(message) .. "\n")
 end
 
 local function publish_ready(ready)
-    fs.write(
+    write_marker(
         marker_path,
         ready and "right-controller world reticle ready\n" or "inactive\n")
     if ready then
-        fs.write(diagnostic_path, "")
+        write_marker(diagnostic_path, "")
     end
 end
 
@@ -177,7 +206,7 @@ local function release_reticle(reason)
     end
 
     publish_ready(false)
-    fs.write(widget_path, "inactive\n")
+    write_marker(widget_path, "inactive\n")
     if reason ~= nil and reason ~= last_release_reason then
         publish_diagnostic("released: " .. tostring(reason))
         print("[Halo motion reticle] released: " .. tostring(reason))
@@ -440,7 +469,7 @@ restore_widget_to_screen = function(widget, parent)
 end
 
 local function create_reticle()
-    if fs.read(gameplay_path):sub(1, 5) ~= "ready" then
+    if read_marker(gameplay_path, "ready\n"):sub(1, 5) ~= "ready" then
         return false
     end
 
@@ -755,7 +784,7 @@ local function create_reticle()
 
     world_reticle_widget = owned_reticle
     world_reticle_parent = nil
-    fs.write(widget_path, "weapon reticle material pending native sync\n")
+    write_marker(widget_path, "weapon reticle material pending native sync\n")
     if not set_screen_reticle_suppressed(true) then
         release_reticle("screen reticle suppression failed")
         return false
@@ -772,9 +801,12 @@ local function create_reticle()
 end
 
 publish_ready(false)
-fs.write(diagnostic_path, "")
-fs.write(widget_path, "inactive\n")
-print("[Halo motion reticle] loaded (dependency-free)")
+write_marker(diagnostic_path, "")
+write_marker(widget_path, "inactive\n")
+print(
+    "[Halo motion reticle] loaded (dependency-free; marker I/O " ..
+    (marker_reads_available and marker_writes_available and
+        "available" or "unavailable, using stock UEVR fallback") .. ")")
 
 local function attempt_create()
     local ok, result = pcall(create_reticle)
@@ -806,9 +838,9 @@ uevr.sdk.callbacks.on_pre_viewport_client_draw(
     if marker_poll_frames <= 0 then
         marker_poll_frames = 12
         gameplay_ready =
-            fs.read(gameplay_path):sub(1, 5) == "ready"
+            read_marker(gameplay_path, "ready\n"):sub(1, 5) == "ready"
         replacement_hidden =
-            fs.read(hide_path):sub(1, 2) == "on"
+            read_marker(hide_path, "off\n"):sub(1, 2) == "on"
     end
 
     if not gameplay_ready then
@@ -902,7 +934,7 @@ uevr.sdk.callbacks.on_pre_viewport_client_draw(
                 local anchor_rotation = anchor:K2_GetComponentRotation()
                 local reticle_location =
                     world_reticle:K2_GetComponentLocation()
-                fs.write(
+                write_marker(
                     pose_path,
                     string.format(
                         "anchor %.6f %.6f %.6f rot %.6f %.6f %.6f\n" ..

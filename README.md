@@ -1,8 +1,8 @@
 # Halo Campaign Evolved UEVR motion controls
 
 This project gives `HaloCampaignEvolved.exe` a standalone right-hand 6DOF
-weapon and native Blam projectile path. The matching UEVR build and the two
-profile files in this project are sufficient at runtime; the UEVR MCP and
+weapon and native Blam projectile path. Current official praydog UEVR and the
+two profile files in this project are sufficient at runtime; the UEVR MCP and
 Meta XR Operator are development and validation tools, not runtime
 dependencies.
 
@@ -11,8 +11,9 @@ standalone, and headset acceptance suites are documented in
 [`TESTING.md`](TESTING.md). Run `tools\Invoke-HaloModValidation.ps1 -Suite
 Plan` to list them without changing or connecting to a live session.
 
-The matching UEVR source, launchers, and packaged standalone release are in
-[UEVRMetaXROperator](https://github.com/elliotttate/UEVRMetaXROperator).
+The optional extended debugging backend lives in
+[UEVRMetaXROperator](https://github.com/elliotttate/UEVRMetaXROperator), but the
+formal release runs on official [praydog/UEVR](https://github.com/praydog/UEVR).
 
 ## What is redirected
 
@@ -122,8 +123,8 @@ Halo's XInput state, and an engaged two-handed hold (bit 8).
 
 ## Controller latency
 
-This profile requires the paired UEVR API 2.43 build. UEVR exposes one
-on-demand OpenXR tracking snapshot containing the HMD plus both controllers'
+On the optional API 2.40+ development backend, UEVR exposes one on-demand
+OpenXR tracking snapshot containing the HMD plus both controllers'
 grip and aim poses, all located at the same current predicted display time.
 The native first-person palette hook requests this snapshot immediately before
 rewriting Halo's render palette instead of reusing controller matrices cached
@@ -131,8 +132,8 @@ during the earlier game tick. The outermost local-fire hook requests the same
 late source before latching its immutable shot sample, so the weapon, reticle,
 muzzle, projectile, and collision sweep remain coherent.
 
-The standard cached UEVR poses remain a fail-open fallback for OpenVR or if
-late OpenXR location is temporarily unavailable. OpenXR compositor timewarp
+Official praydog UEVR uses the public grip/aim pose API as the fully supported
+fallback. OpenXR compositor timewarp
 still corrects head motion only; this late-location path addresses the separate
 controller latency that compositor reprojection cannot repair after the weapon
 has already been drawn.
@@ -236,16 +237,15 @@ visible or is restored.
 ## Standalone installation
 
 The [GitHub Releases](https://github.com/elliotttate/HaloCampaignEvolved-UEVR/releases)
-package is self-contained: extract it, run `Verify-Package.ps1`, then run
-`Install-HaloCEVR.ps1`. It carries the matching UEVR API 2.43 backend,
-injector, native plugin, Lua reticle, profile-safe installer/uninstaller, and
-checksums. Meta XR Operator and MCP are deliberately excluded from the runtime
-package.
+package is one-step: extract it, run `Verify-Package.ps1`, then run
+`Install-HaloCEVR.ps1`. The installer downloads official praydog UEVR nightly
+01139 directly from praydog, verifies its published SHA-256, and installs the
+native plugin, Lua reticle, and profile settings. Meta XR Operator and MCP are
+deliberately excluded from the runtime package.
 
-For a real headset, select its OpenXR runtime, launch Halo through Steam, then
-run `UEVRInjector.exe --attach=HaloCampaignEvolved.exe` from the extracted
-release. The `Start-HaloCEVR-Standalone.ps1` path below is the automated Meta
-XR Simulator launch path.
+For a real headset, select its OpenXR runtime and run `Start-HaloCEVR.ps1`.
+It automates the Steam launch and official
+`uevr\UEVRInjector.exe --attach=HaloCampaignEvolved.exe` path.
 
 For a manual developer install, build the project and copy exactly these two
 files into the per-game UEVR profile:
@@ -274,30 +274,22 @@ UObjectHook_AttachLerpEnabled=false
 VR_MetaXROperatorEnabled=false
 ```
 
-The packaged launchers perform the two file copies, verify both SHA-256 hashes,
-and upsert and verify all nine values automatically.
+The packaged launchers download and checksum the pinned official UEVR nightly,
+perform the two profile file copies, verify both SHA-256 hashes, and upsert and
+verify all nine values automatically.
 `VR_AimMethod=0` is UEVR's `GAME` mode: controller tracking remains available
 to the plugin without rotating Halo's game camera.
 
 For the normal standalone path, run:
 
 ```powershell
-.\Start-HaloCEVR-Standalone.ps1
+.\Start-HaloCEVR.ps1
 ```
 
-That path selects and starts Meta XR Simulator, launches Halo through Steam,
-and starts the official auto-attach injector. It deliberately removes this
-package's Meta XR Operator explicit-layer registration and neither opens nor
-waits for an MCP port. It also persists
-`VR_MetaXROperatorEnabled=false`; the backend strips Operator from
-`XR_ENABLE_API_LAYERS` and skips discovery even if a different Operator
-package remains registered. Runtime behavior comes only from UEVR, the native
-profile plugin, and the Lua reticle.
-
-`Start-UEVRMetaXROperator.ps1` remains the development/validation launcher. It
-loads the same standalone files but additionally enables Meta XR Operator so a
-developer can inspect and drive the simulated session through MCP. That path
-persists `VR_MetaXROperatorEnabled=true`.
+That path launches Halo through Steam and starts praydog's official auto-attach
+injector without selecting or changing the system OpenXR runtime. Runtime
+behavior comes only from official UEVR, the native profile plugin, and the Lua
+reticle. Meta XR Operator remains an optional development and validation tool.
 
 Both launchers also rewrite all three saved UEVR camera presets so their
 `decoupled_pitch` and `decoupled_pitch_ui_adjust` values remain false after a
@@ -314,14 +306,21 @@ global plugins or require `uevr_mcp.dll`.
 ```powershell
 cmake -S . -B build -A x64
 cmake --build build --config Release
+ctest --test-dir build -C Release --output-on-failure
 ```
 
-Override `UEVR_SDK_INCLUDE` at configure time if
-`../uevr-mcp/plugin/include` is not the local UEVR plugin SDK path:
+The default configure uses an adjacent `UEVR-1.05-sdk` checkout or fetches the
+official UEVR 1.05 tag only as the oldest plugin SDK ABI. Building against API
+2.34 keeps the DLL loadable by current official UEVR builds; API 2.40-2.43
+enhancements are detected at runtime and never raise the minimum version. Halo
+itself requires a current UEVR scanner; the formal release pins the verified
+official nightly 01139 rather than the old 1.05 runtime.
+
+Override `UEVR_SDK_INCLUDE` only with the official UEVR 1.05 include directory:
 
 ```powershell
 cmake -S . -B build -A x64 `
-  -DUEVR_SDK_INCLUDE="C:\path\to\uevr\plugin\include"
+  -DUEVR_SDK_INCLUDE="C:\path\to\UEVR-1.05\include"
 ```
 
 The release DLL is

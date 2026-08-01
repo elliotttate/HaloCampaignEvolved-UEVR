@@ -5,15 +5,9 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $required = @(
-    'UEVRInjector.exe',
-    'UEVRBackend.dll',
-    'LuaVR.dll',
-    'openvr_api.dll',
-    'openxr_loader.dll',
-    'UEVRPluginNullifier.dll',
     'UEVRInjector.dll.config',
-    'Start-HaloCEVR-Standalone.ps1',
-    'Start-HaloCEVR-Core.ps1',
+    'Install-OfficialUEVR.ps1',
+    'Start-HaloCEVR.ps1',
     'Install-HaloCEVR.ps1',
     'Uninstall-HaloCEVR.ps1',
     'plugins\HaloCEMotionControls.dll',
@@ -27,6 +21,17 @@ foreach ($relativePath in $required) {
     $path = Join-Path $PSScriptRoot $relativePath
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
         throw "Required package file is missing: $relativePath"
+    }
+}
+
+foreach ($upstreamBinary in @(
+        'UEVRInjector.exe',
+        'UEVRBackend.dll',
+        'LuaVR.dll',
+        'openxr_loader.dll')) {
+    $path = Join-Path $PSScriptRoot $upstreamBinary
+    if (Test-Path -LiteralPath $path -PathType Leaf) {
+        throw "Package must download official UEVR from praydog, not redistribute $upstreamBinary"
     }
 }
 

@@ -2,7 +2,8 @@
 param(
     [string]$ProfileRoot = (
         Join-Path $env:APPDATA 'UnrealVRMod\HaloCampaignEvolved'),
-    [string]$GameRoot = ''
+    [string]$GameRoot = '',
+    [switch]$SkipOfficialUEVRDownload
 )
 
 $ErrorActionPreference = 'Stop'
@@ -164,6 +165,10 @@ foreach ($path in @($pluginSource, $luaSource) + $logicModSources) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
         throw "Package payload is missing: $path"
     }
+}
+
+if (-not $SkipOfficialUEVRDownload) {
+    & (Join-Path $PSScriptRoot 'Install-OfficialUEVR.ps1')
 }
 
 $ProfileRoot = [System.IO.Path]::GetFullPath($ProfileRoot)

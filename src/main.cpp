@@ -1,8 +1,9 @@
-#include <uevr/HaloCEVRDiagnostics.h>
 #include <uevr/Plugin.hpp>
 
 #include "HaloCEVRConfig.hpp"
 #include "HaloCEVRCore.hpp"
+#include "HaloCEVRDiagnostics.h"
+#include "HaloCEVRUEVRExtensions.hpp"
 
 #include <Windows.h>
 #include <intrin.h>
@@ -1112,7 +1113,8 @@ bool valid_basis(const Mat3& value) {
            std::abs(dot(value.left, value.up)) < 0.2f;
 }
 
-bool valid_openxr_pose(const UEVR_TrackingPose& pose) {
+bool valid_openxr_pose(
+    const halo_cevr::uevr_extensions::TrackingPose& pose) {
     constexpr unsigned long long orientation_valid = 1ULL << 0;
     constexpr unsigned long long position_valid = 1ULL << 1;
     constexpr auto required = orientation_valid | position_valid;
@@ -1131,9 +1133,9 @@ bool valid_openxr_pose(const UEVR_TrackingPose& pose) {
 TrackingSnapshot capture_tracking_snapshot_raw() {
     TrackingSnapshot snapshot{};
 
-    UEVR_LateTrackingSnapshot late{};
+    halo_cevr::uevr_extensions::LateTrackingSnapshot late{};
     if (API::VR::is_openxr() &&
-        API::VR::get_late_tracking_snapshot(late) &&
+        halo_cevr::uevr_extensions::get_late_tracking_snapshot(late) &&
         valid_openxr_pose(late.hmd) &&
         valid_openxr_pose(late.right_grip) &&
         valid_openxr_pose(late.right_aim)) {
@@ -4017,7 +4019,7 @@ public:
         publish_gameplay_ready(false, true);
         publish_reticle_hide(false, true);
         g_replacement_reticle_active.store(false, std::memory_order_release);
-        API::VR::clear_openxr_compositor_quad();
+        halo_cevr::uevr_extensions::clear_openxr_compositor_quad();
         API::UObjectHook::activate();
         // The native weapon/palette/projectile path below reads the raw
         // right-controller pose directly. UEVR's global RIGHT_CONTROLLER aim
@@ -4148,7 +4150,7 @@ public:
 
     void on_device_reset() override {
         if (m_armed) {
-            API::VR::clear_openxr_compositor_quad();
+            halo_cevr::uevr_extensions::clear_openxr_compositor_quad();
             m_openxr_reticle_published = false;
         }
     }
@@ -4451,7 +4453,7 @@ private:
             if (!g_mod_enabled.load(std::memory_order_acquire)) {
                 publish_gameplay_ready(false);
                 publish_reticle_hide(true);
-                API::VR::clear_openxr_compositor_quad();
+                halo_cevr::uevr_extensions::clear_openxr_compositor_quad();
             }
         }
         m_kill_switch_down = down;
@@ -5333,7 +5335,7 @@ private:
 
     void clear_openxr_reticle_quad(bool restore_world_geometry) {
         if (m_openxr_reticle_published) {
-            API::VR::clear_openxr_compositor_quad();
+            halo_cevr::uevr_extensions::clear_openxr_compositor_quad();
             m_openxr_reticle_published = false;
         }
 
@@ -5822,9 +5824,10 @@ private:
             {0.0f, 0.0f, 1.0f},
             normalized(tracking.hmd_position - target));
 
-        UEVR_OpenXRCompositorQuadState state{};
+        halo_cevr::uevr_extensions::OpenXRCompositorQuadState state{};
         state.size = sizeof(state);
-        state.flags = UEVR_OPENXR_COMPOSITOR_QUAD_VISIBLE;
+        state.flags =
+            halo_cevr::uevr_extensions::kCompositorQuadVisible;
         state.texture = m_world_reticle_render_target->to_handle();
         state.position = {target.x, target.y, target.z};
         state.rotation = {
@@ -5836,7 +5839,7 @@ private:
             reticle_texture_extent_meters,
             reticle_texture_extent_meters};
 
-        if (!API::VR::set_openxr_compositor_quad(state)) {
+        if (!halo_cevr::uevr_extensions::set_openxr_compositor_quad(state)) {
             clear_openxr_reticle_quad(true);
             return;
         }
@@ -5927,9 +5930,11 @@ private:
             const auto scalar = [](UEVR_ActionHandle action,
                                    UEVR_InputSourceHandle source) {
                 float value{};
-                if (!API::VR::get_action_float_value(
+                if (!halo_cevr::uevr_extensions::get_action_float_value(
                         action, source, value)) {
-                    return 0.0f;
+                    return API::VR::is_action_active(action, source)
+                        ? 1.0f
+                        : 0.0f;
                 }
                 return std::clamp(value, 0.0f, 1.0f);
             };

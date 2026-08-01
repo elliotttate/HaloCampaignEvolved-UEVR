@@ -2,9 +2,6 @@
 param(
     [Parameter(Mandatory)][string]$Version,
     [string]$BuildDirectory = '',
-    [string]$OperatorPackageRoot = (
-        'E:\Github\UEVRMetaXROperator\dist\release\' +
-        'UEVR-Meta-XR-Operator-205.1-nightly-01139-analog-hands-v1'),
     [string]$OutputRoot = ''
 )
 
@@ -29,26 +26,8 @@ $null = New-Item -ItemType Directory -Path (Join-Path $stageRoot 'plugins') -For
 $null = New-Item -ItemType Directory -Path (Join-Path $stageRoot 'scripts') -Force
 $null = New-Item -ItemType Directory -Path (Join-Path $stageRoot 'logicmods') -Force
 
-$copyMap = [ordered]@{
-    'LuaVR.dll' = 'LuaVR.dll'
-    'openvr_api.dll' = 'openvr_api.dll'
-    'openxr_loader.dll' = 'openxr_loader.dll'
-    'revision.txt' = 'revision.txt'
-    'UEVRBackend.dll' = 'UEVRBackend.dll'
-    'UEVRInjector.dll.config' = 'UEVRInjector.dll.config'
-    'UEVRInjector.exe' = 'UEVRInjector.exe'
-    'UEVRPluginNullifier.dll' = 'UEVRPluginNullifier.dll'
-    'Start-HaloCEVR-Standalone.ps1' = 'Start-HaloCEVR-Standalone.ps1'
-    'Start-UEVRMetaXROperator.ps1' = 'Start-HaloCEVR-Core.ps1'
-}
-foreach ($entry in $copyMap.GetEnumerator()) {
-    $source = Join-Path $OperatorPackageRoot $entry.Key
-    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
-        throw "Paired UEVR package is missing $($entry.Key): $source"
-    }
-    Copy-Item -LiteralPath $source -Destination (
-        Join-Path $stageRoot $entry.Value)
-}
+Copy-Item -LiteralPath (Join-Path $repoRoot 'release\UEVRInjector.dll.config') `
+    -Destination (Join-Path $stageRoot 'UEVRInjector.dll.config') -Force
 
 $plugin = Join-Path $BuildDirectory 'Release\HaloCEMotionControls.dll'
 if (-not (Test-Path -LiteralPath $plugin -PathType Leaf)) {
@@ -69,7 +48,8 @@ foreach ($name in @('HaloCEReticleColor.pak', 'HaloCEReticleColor.utoc',
 }
 
 foreach ($name in @('Install-HaloCEVR.ps1', 'Uninstall-HaloCEVR.ps1',
-        'Verify-Package.ps1')) {
+        'Verify-Package.ps1', 'Start-HaloCEVR.ps1',
+        'Install-OfficialUEVR.ps1')) {
     Copy-Item -LiteralPath (Join-Path $repoRoot "release\$name") `
         -Destination (Join-Path $stageRoot $name)
 }
@@ -93,14 +73,16 @@ $manifest = [ordered]@{
     version = $Version
     source_repository = 'https://github.com/elliotttate/HaloCampaignEvolved-UEVR'
     source_commit = $sourceCommit
-    paired_uevr_package = Split-Path -Leaf $OperatorPackageRoot
-    runtime_model = 'standalone UEVR API 2.43; no MCP or Meta XR Operator dependency'
+    upstream_uevr = 'praydog/UEVR nightly-01139'
+    upstream_uevr_release = 'https://github.com/praydog/UEVR-nightly/releases/tag/nightly-01139-74b76bc9428a906cbdc69de3ebc1905fd0e9cc57'
+    upstream_uevr_revision = '74b76bc9428a906cbdc69de3ebc1905fd0e9cc57'
+    upstream_uevr_zip_sha256 = 'FA6F590926F3622222969BDDD5C128D9FCB57B8EDB38CFAA550C4A3A50FA721B'
+    plugin_required_api = '2.34.0'
+    runtime_model = 'official praydog UEVR; optional API 2.40-2.43 enhancements'
     plugin_sha256 = (Get-FileHash -LiteralPath (
         Join-Path $stageRoot 'plugins\HaloCEMotionControls.dll') -Algorithm SHA256).Hash
     reticle_lua_sha256 = (Get-FileHash -LiteralPath (
         Join-Path $stageRoot 'scripts\halo_motion_reticle.lua') -Algorithm SHA256).Hash
-    uevr_backend_sha256 = (Get-FileHash -LiteralPath (
-        Join-Path $stageRoot 'UEVRBackend.dll') -Algorithm SHA256).Hash
     reticle_logicmod_sha256 = [ordered]@{
         pak = (Get-FileHash -LiteralPath (
             Join-Path $stageRoot 'logicmods\HaloCEReticleColor.pak') -Algorithm SHA256).Hash

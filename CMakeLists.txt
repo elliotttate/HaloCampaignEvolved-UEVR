@@ -2,18 +2,40 @@ cmake_minimum_required(VERSION 3.24)
 
 project(HaloCEMotionControls LANGUAGES CXX)
 
-set(_default_uevr_sdk_include
-    "${CMAKE_CURRENT_SOURCE_DIR}/../UEVRMetaXROperator/include")
-if(NOT EXISTS "${_default_uevr_sdk_include}/uevr/Plugin.hpp")
-    set(_default_uevr_sdk_include
-        "${CMAKE_CURRENT_SOURCE_DIR}/../uevr-mcp/plugin/include")
-endif()
 set(
     UEVR_SDK_INCLUDE
-    "${_default_uevr_sdk_include}"
+    ""
     CACHE PATH
-    "Directory containing uevr/Plugin.hpp"
+    "Directory containing uevr/Plugin.hpp (defaults to official UEVR 1.05)"
 )
+
+# Build against the oldest official praydog plugin ABI we target. A plugin
+# compiled against API 2.34 also loads on newer UEVR builds; compiling against
+# a newer header would unnecessarily raise the loader's minimum version. This
+# is an ABI choice, not a claim that UEVR 1.05's scanner supports modern Halo.
+if(NOT UEVR_SDK_INCLUDE)
+    set(_local_uevr_105 "${CMAKE_CURRENT_SOURCE_DIR}/../UEVR-1.05-sdk/include")
+    if(EXISTS "${_local_uevr_105}/uevr/Plugin.hpp")
+        set(UEVR_SDK_INCLUDE "${_local_uevr_105}")
+    else()
+        include(FetchContent)
+        FetchContent_Declare(
+            uevr_105_sdk
+            GIT_REPOSITORY "https://github.com/praydog/UEVR.git"
+            GIT_TAG "1.05"
+            GIT_SHALLOW TRUE
+        )
+        FetchContent_GetProperties(uevr_105_sdk)
+        if(NOT uevr_105_sdk_POPULATED)
+            FetchContent_Populate(uevr_105_sdk)
+        endif()
+        set(UEVR_SDK_INCLUDE "${uevr_105_sdk_SOURCE_DIR}/include")
+    endif()
+endif()
+
+if(NOT EXISTS "${UEVR_SDK_INCLUDE}/uevr/Plugin.hpp")
+    message(FATAL_ERROR "UEVR_SDK_INCLUDE does not contain uevr/Plugin.hpp")
+endif()
 
 add_library(HaloCEMotionControls SHARED
     src/HaloCEVRConfig.cpp
@@ -28,6 +50,7 @@ target_compile_definitions(HaloCEMotionControls PRIVATE
 )
 target_include_directories(HaloCEMotionControls PRIVATE
     "${UEVR_SDK_INCLUDE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
 )
 
 set_target_properties(HaloCEMotionControls PROPERTIES
@@ -36,6 +59,16 @@ set_target_properties(HaloCEMotionControls PROPERTIES
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(HaloCEVRUEVRCompatibilityTest
+        tests/test-uevr-compat.cpp
+    )
+    target_compile_features(HaloCEVRUEVRCompatibilityTest PRIVATE cxx_std_20)
+    add_test(
+        NAME HaloCEMotionControls.OfficialUEVRCompatibility
+        COMMAND HaloCEVRUEVRCompatibilityTest
+            $<TARGET_FILE:HaloCEMotionControls>
+    )
+
     add_executable(HaloCEVRCoreTests
         tests/test-core.cpp
         src/HaloCEVRConfig.cpp
@@ -112,5 +145,14 @@ if(BUILD_TESTING)
             -NoProfile
             -ExecutionPolicy Bypass
             -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/validate-reticle-color-sequence.ps1"
+    )
+    add_test(
+        NAME HaloCEMotionControls.OfficialUEVRReleaseIntegration
+        COMMAND powershell
+            -NoProfile
+            -ExecutionPolicy Bypass
+            -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/validate-release.ps1"
+            -ReleaseRoot "${CMAKE_CURRENT_SOURCE_DIR}/release"
+            -PackagerPath "${CMAKE_CURRENT_SOURCE_DIR}/tools/New-HaloStandaloneRelease.ps1"
     )
 endif()

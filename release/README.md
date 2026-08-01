@@ -1,9 +1,9 @@
 # Halo Campaign Evolved UEVR standalone @VERSION@
 
-This is the self-contained, no-MCP release of the Halo Campaign Evolved 6DOF
-motion-control mod. It includes the paired UEVR API 2.43 backend and injector,
-the native `HaloCEMotionControls.dll`, and the authored world-reticle Lua
-script. Source commit: `@SOURCE_COMMIT@`.
+This is the no-MCP release of the Halo Campaign Evolved 6DOF motion-control
+mod. It includes the native `HaloCEMotionControls.dll`, authored world-reticle
+Lua script, and a checksum-pinned downloader for the official praydog UEVR
+nightly tested with this game. Source commit: `@SOURCE_COMMIT@`.
 
 Meta XR Operator and the UEVR MCP were used for development and automated
 validation, but neither is required at runtime and neither is included here.
@@ -18,13 +18,20 @@ validation, but neither is required at runtime and neither is included here.
    powershell -NoProfile -ExecutionPolicy Bypass -File .\Verify-Package.ps1
    ```
 
-3. Install the Halo profile files, reticle LogicMod, and required UEVR settings:
+3. Download the tested official UEVR nightly, then install the Halo profile
+   files, reticle LogicMod, and required UEVR settings:
 
    ```powershell
    powershell -NoProfile -ExecutionPolicy Bypass -File .\Install-HaloCEVR.ps1
    ```
 
-The installer copies only these runtime mod files:
+`Install-HaloCEVR.ps1` downloads UEVR directly from praydog's public
+`nightly-01139` release and verifies the official ZIP SHA-256 before extracting
+it into this release's `uevr` folder. UEVR is not redistributed inside this
+mod ZIP. Pass `-SkipOfficialUEVRDownload` only when you will inject with a
+separate current official UEVR installation.
+
+The installer copies only these mod files into Halo and its profile:
 
 ```text
 %APPDATA%\UnrealVRMod\HaloCampaignEvolved\
@@ -60,35 +67,33 @@ The original configuration is backed up on the first install.
 1. Select SteamVR, Meta Quest Link, or your preferred headset runtime as the
    active system OpenXR runtime.
 2. Launch Halo Campaign Evolved through Steam and load a campaign level.
-3. Run:
+3. From the extracted release, run:
 
    ```powershell
-   .\UEVRInjector.exe --attach=HaloCampaignEvolved.exe
+   .\Start-HaloCEVR.ps1
    ```
 
-The injector watches for the Steam-launched process and loads the paired UEVR
-backend. No MCP connection is necessary.
+The launcher uses `uevr\UEVRInjector.exe --attach=HaloCampaignEvolved.exe`.
+No MCP connection is necessary. The tested baseline is official praydog UEVR
+nightly 01139, revision `74b76bc9428a906cbdc69de3ebc1905fd0e9cc57`.
 
 ## Run with Meta XR Simulator
 
 Install Meta XR Simulator, close any existing Halo process, then run:
 
 ```powershell
-.\Start-HaloCEVR-Standalone.ps1
+.\Start-HaloCEVR.ps1
 ```
 
-If Halo is installed somewhere other than the launcher's default Steam
-library, pass its executable explicitly:
+The launcher starts Steam AppID 2806050 without focusing Halo and uses the
+official `--attach=HaloCampaignEvolved.exe` injection path. Select the desired
+OpenXR runtime, including Meta XR Simulator, before running it.
 
-```powershell
-.\Start-HaloCEVR-Standalone.ps1 `
-  -GameExe 'D:\SteamLibrary\steamapps\common\Halo Campaign Evolved\Meteorite\Binaries\Win64\HaloCampaignEvolved.exe'
-```
-
-The standalone launcher selects Meta XR Simulator, stages and verifies the
-profile payload, launches Steam AppID 2806050, and uses the official
-`--attach=HaloCampaignEvolved.exe` injection path. It explicitly disables Meta
-XR Operator for the shipping session.
+The native DLL advertises UEVR plugin API 2.34 and uses only official public
+pose/input functions for normal play. Optional API 2.40-2.43 calls are detected
+at runtime and used only for enhanced diagnostics, lower-latency pose sampling,
+and compositor publication when an extended development build supplies them.
+They are never required.
 
 ## Controls and behavior
 
@@ -139,6 +144,10 @@ over subsequently edited files.
 - **Verify or install reports a hash mismatch:** delete the extracted folder,
   download the ZIP again, and re-extract it. Do not mix files from older
   releases.
+- **UEVR 1.05 loads the DLL but Halo never reaches VR:** the stable 1.05 engine
+  scanner predates this Halo UE build. Use the checksum-pinned official nightly
+  installed by this package; the plugin's 2.34 API baseline does not make the
+  old scanner understand a newer game executable.
 
 ## Integrity
 
