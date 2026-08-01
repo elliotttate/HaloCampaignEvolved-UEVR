@@ -28,6 +28,7 @@ struct RuntimeConfig {
     float dpad_deadzone{0.55f};
     bool right_stick_down_crouch{true};
     bool menu_button_is_back{true};
+    bool prevent_controller_sleep{true};
 
     bool cutscene_comfort{true};
     bool logical_aim_follower{false};

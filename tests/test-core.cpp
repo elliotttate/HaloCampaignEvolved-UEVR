@@ -145,6 +145,7 @@ int main() {
         "turn_mode=smooth\n"
         "movement_deadzone=9\n"
         "reticle_distance_meters=-3\n"
+        "prevent_controller_sleep=false\n"
         "logical_aim_follower=true\n");
     require(!config.enabled && config.floating_hands,
             "typed boolean parsing");
@@ -156,6 +157,8 @@ int main() {
             near(config.reticle_distance_meters, 0.5f),
             "numeric settings must clamp safely");
     require(config.logical_aim_follower, "logical follower parsing");
+    require(!config.prevent_controller_sleep,
+            "controller sleep policy parsing");
 
     CalibrationState persisted{};
     persisted.controller = first;

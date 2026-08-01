@@ -189,6 +189,8 @@ RuntimeConfig parse_runtime_config(std::string_view text) {
         values, "right_stick_down_crouch", result.right_stick_down_crouch);
     result.menu_button_is_back = as_bool(
         values, "menu_button_is_back", result.menu_button_is_back);
+    result.prevent_controller_sleep = as_bool(
+        values, "prevent_controller_sleep", result.prevent_controller_sleep);
     result.cutscene_comfort = as_bool(
         values, "cutscene_comfort", result.cutscene_comfort);
     result.logical_aim_follower = as_bool(
@@ -255,7 +257,9 @@ std::string default_runtime_config_text() {
         "dpad_shift=true\n"
         "dpad_deadzone=0.55\n"
         "right_stick_down_crouch=true\n"
-        "menu_button_is_back=true\n\n"
+        "menu_button_is_back=true\n"
+        "# Operator can force controller mode indefinitely; stock UEVR uses its 100-second maximum.\n"
+        "prevent_controller_sleep=true\n\n"
         "cutscene_comfort=true\n"
         "# Optional low-bandwidth game-aim synchronization. Native projectile aim remains authoritative.\n"
         "logical_aim_follower=false\n"

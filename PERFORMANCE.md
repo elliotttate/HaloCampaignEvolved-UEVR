@@ -18,6 +18,7 @@ GPU, CPU, runtime, resolution, and level.
 | Projectile redirection | Local shots only | Bounded marker/projectile arrays and matrix math. Remote/network projectiles fail through without modification. |
 | Cached Unreal maintenance | 4 Hz | Local-pawn/weapon checks, reticle property checks, and transition marker polling. Full UObject discovery is skipped after the required component and images are cached. |
 | Live config reload | 0.5 Hz | Timestamp/read-if-changed check. Parsing and UEVR setting updates occur only after an actual file change. |
+| UEVR compatibility and controller diagnostics | 0.5 Hz | Four low-frequency lookups through UEVR's small mod/option lists plus one constant-time controller-gate query. It writes only when profile drift is detected, including restoring the controller no-sleep policy. No UObject or filesystem scan. |
 | Lua reticle lifetime check | Viewport draw | Cached UObjectHook lifetime tests and property comparisons. Marker files are polled every 30 callbacks; diagnostic marker output is refreshed every 180 callbacks. |
 
 ## Expensive recovery paths
@@ -40,9 +41,11 @@ the backoff prevents a missing HUD from becoming sustained single-digit FPS.
 
 ## Removed recurring work
 
-- UEVR aim, pitch, hand-swap, and inactivity settings are now applied once
-  after profile bootstrap instead of walking UEVR's mod-value collection every
-  engine tick.
+- UEVR aim, pitch, hand-swap, and inactivity invariants are checked twice per
+  second instead of walking UEVR's mod-value collection every engine tick.
+  The watchdog performs writes only when a profile or another plugin changes
+  an invariant. This also repairs controller no-sleep settings after late
+  profile reloads without creating per-frame work.
 - Eight OpenXR action-name lookups are refreshed twice per second rather than
   every engine tick. This removes repeated temporary `std::string` construction
   in official UEVR while retaining session-recreation recovery.

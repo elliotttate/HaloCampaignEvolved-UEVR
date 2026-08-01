@@ -55,6 +55,8 @@ constexpr std::uint32_t kStatusModEnabled = 1U << 9;
 constexpr std::uint32_t kStatusCinematicActive = 1U << 10;
 constexpr std::uint32_t kStatusDominantHandLeft = 1U << 11;
 constexpr std::uint32_t kStatusLogicalAimFollower = 1U << 12;
+constexpr std::uint32_t kStatusUevrControllerGateActive = 1U << 13;
+constexpr std::uint32_t kStatusNativeTrackingWhileUevrGateInactive = 1U << 14;
 constexpr std::uint32_t kDiagnosticVisualValid = 1U << 0;
 constexpr std::uint32_t kDiagnosticMarkerValid = 1U << 1;
 constexpr std::uint32_t kDiagnosticProjectileValid = 1U << 2;
@@ -408,6 +410,9 @@ std::atomic<float> g_dpad_deadzone{0.55f};
 std::atomic_bool g_crouch_on_right_stick_down{true};
 std::atomic_bool g_menu_button_is_back{true};
 std::atomic_bool g_logical_aim_follower_enabled{};
+std::atomic_bool g_prevent_controller_sleep{true};
+std::atomic_bool g_uevr_controller_gate_active{};
+std::atomic_bool g_native_tracking_while_uevr_gate_inactive{};
 std::atomic<float> g_logical_aim_x{};
 std::atomic<float> g_logical_aim_y{};
 std::atomic<float> g_reticle_distance_meters{10.0f};
@@ -3905,6 +3910,13 @@ extern "C" __declspec(dllexport) bool HaloCEVR_GetStatus(
     if (g_logical_aim_follower_enabled.load(std::memory_order_acquire)) {
         flags |= kStatusLogicalAimFollower;
     }
+    if (g_uevr_controller_gate_active.load(std::memory_order_acquire)) {
+        flags |= kStatusUevrControllerGateActive;
+    }
+    if (g_native_tracking_while_uevr_gate_inactive.load(
+            std::memory_order_acquire)) {
+        flags |= kStatusNativeTrackingWhileUevrGateInactive;
+    }
 
     const HaloCEVR_RuntimeStatus snapshot{
         .size = sizeof(HaloCEVR_RuntimeStatus),
@@ -4061,7 +4073,7 @@ public:
             0.0f,
             m_uobject_discovery_timer - std::max(delta, 0.0f));
 
-        apply_uevr_runtime_compatibility_once();
+        maintain_uevr_runtime_compatibility(delta);
 
         const auto cinematic = halo_cinematic_in_progress();
         const auto previous_cinematic = g_cinematic_active.exchange(
@@ -4094,6 +4106,7 @@ public:
             !mod_enabled || (cinematic && cutscene_comfort);
         if (suspended) {
             publish_tracking_snapshot({});
+            update_controller_gate_diagnostics(delta);
             publish_gameplay_ready(false);
             publish_reticle_hide(true);
             g_local_weapon_index.store(
@@ -4115,6 +4128,7 @@ public:
         }
 
         update_tracking_snapshot();
+        update_controller_gate_diagnostics(delta);
         update_physical_hand_input(delta);
         update_logical_aim_follower();
         update_two_hand_hold(delta);
@@ -4345,31 +4359,182 @@ public:
 private:
     enum class CalibrationMode { None, Controller, Weapon };
 
-    void apply_uevr_runtime_compatibility_once() {
-        if (m_uevr_runtime_settings_applied) {
+    static std::optional<bool> read_mod_bool(std::string_view key) {
+        const auto value = API::VR::get_mod_value<std::string>(key);
+        if (value.empty()) {
+            return std::nullopt;
+        }
+        return value == "true" || value == "1";
+    }
+
+    static std::optional<float> read_mod_float(std::string_view key) {
+        const auto value = API::VR::get_mod_value<std::string>(key);
+        if (value.empty()) {
+            return std::nullopt;
+        }
+        try {
+            return std::stof(value);
+        } catch (...) {
+            return std::nullopt;
+        }
+    }
+
+    static bool repair_mod_bool(std::string_view key, bool desired) {
+        const auto current = read_mod_bool(key);
+        if (!current.has_value() || *current == desired) {
+            return false;
+        }
+        API::VR::set_mod_value(key, desired);
+        return true;
+    }
+
+    void restore_owned_no_sleep_settings() {
+        if (m_force_active_restore_value.has_value()) {
+            // Restore only while the setting still has the value we wrote.
+            // A user or another plugin changing it later owns that newer
+            // value and must not be overwritten.
+            if (read_mod_bool("VR_ForceMotionControlsActive")
+                    .value_or(false)) {
+                API::VR::set_mod_value(
+                    "VR_ForceMotionControlsActive",
+                    *m_force_active_restore_value);
+            }
+            m_force_active_restore_value.reset();
+        }
+        if (m_inactivity_restore_value.has_value()) {
+            const auto current = read_mod_float(
+                "VR_MotionControlsInactivityTimer");
+            if (current.has_value() &&
+                std::abs(*current - 100.0f) <= 0.01f) {
+                API::VR::set_mod_value(
+                    "VR_MotionControlsInactivityTimer",
+                    *m_inactivity_restore_value);
+            }
+            m_inactivity_restore_value.reset();
+        }
+    }
+
+    void maintain_uevr_runtime_compatibility(float delta) {
+        m_uevr_settings_watchdog_timer -= std::max(delta, 0.0f);
+        if (m_uevr_settings_watchdog_timer > 0.0f) {
             return;
         }
+        m_uevr_settings_watchdog_timer = 2.0f;
 
         // External plugins initialize before UEVR finishes loading the
-        // per-game profile. Apply these invariants once after that bootstrap
-        // window rather than walking UEVR's complete mod-value list every
-        // engine tick.
-        API::VR::set_aim_method(API::VR::AimMethod::GAME);
-        API::VR::set_decoupled_pitch_enabled(false);
-        API::VR::set_mod_value("VR_DecoupledPitchUIAdjust", false);
+        // per-game profile. Check the invariants at 0.5 Hz and write only on
+        // drift: this prevents another profile/plugin from putting Halo back
+        // into head-coupled aim without the old per-frame mod-list walk.
+        bool repaired = false;
+        if (API::VR::get_aim_method() != API::VR::AimMethod::GAME) {
+            API::VR::set_aim_method(API::VR::AimMethod::GAME);
+            repaired = true;
+        }
+        if (API::VR::is_decoupled_pitch_enabled()) {
+            API::VR::set_decoupled_pitch_enabled(false);
+            repaired = true;
+        }
+        repaired = repair_mod_bool("VR_DecoupledPitchUIAdjust", false) ||
+            repaired;
         // Halo's dominant_hand setting owns semantic hand selection. UEVR's
         // global swap would otherwise swap physical indices first and Halo
         // would swap them again.
-        API::VR::set_mod_value("VR_SwapControllerInputs", false);
-        // This is a stock praydog UEVR setting. The default 30-second timeout
-        // can mark a valid stationary/simulated controller inactive; 100 is
-        // the official slider maximum.
-        API::VR::set_mod_value(
-            "VR_MotionControlsInactivityTimer", 100.0f);
-        m_uevr_runtime_settings_applied = true;
-        API::get()->log_info(
-            "HaloCEMotionControls: official UEVR runtime invariants applied; "
-            "motion-controller inactivity timeout=100 seconds");
+        repaired = repair_mod_bool("VR_SwapControllerInputs", false) ||
+            repaired;
+
+        const auto prevent_sleep_requested =
+            g_prevent_controller_sleep.load(std::memory_order_acquire);
+        const auto prevent_sleep = prevent_sleep_requested &&
+            g_mod_enabled.load(std::memory_order_acquire);
+        if (prevent_sleep) {
+            // Stock praydog UEVR exposes only the 100-second maximum. The
+            // Operator fork also exposes ForceMotionControlsActive; querying
+            // it as a string lets the same DLL detect that optional setting
+            // without assuming it exists on stock UEVR.
+            const auto inactivity = read_mod_float(
+                "VR_MotionControlsInactivityTimer");
+            if (inactivity.has_value() &&
+                std::abs(*inactivity - 100.0f) > 0.01f) {
+                if (!m_inactivity_restore_value.has_value()) {
+                    m_inactivity_restore_value = *inactivity;
+                }
+                API::VR::set_mod_value(
+                    "VR_MotionControlsInactivityTimer", 100.0f);
+                repaired = true;
+            }
+            const auto force_active = read_mod_bool(
+                "VR_ForceMotionControlsActive");
+            if (force_active.has_value() && !*force_active) {
+                if (!m_force_active_restore_value.has_value()) {
+                    m_force_active_restore_value = *force_active;
+                }
+                API::VR::set_mod_value(
+                    "VR_ForceMotionControlsActive", true);
+                repaired = true;
+            }
+        } else {
+            // Release only values this plugin actually changed. In particular,
+            // prevent_controller_sleep=false must not disable a user's
+            // independently enabled Operator force-active setting.
+            const auto owned_settings =
+                m_force_active_restore_value.has_value() ||
+                m_inactivity_restore_value.has_value();
+            restore_owned_no_sleep_settings();
+            repaired = repaired || owned_settings;
+        }
+
+        if (!m_uevr_settings_initialized || repaired) {
+            m_uevr_settings_initialized = true;
+            API::get()->log_info(
+                "HaloCEMotionControls: UEVR invariants %s; "
+                "prevent_controller_sleep=%d (Operator force=%s, "
+                "stock timeout=%s)",
+                repaired ? "repaired" : "verified",
+                prevent_sleep_requested ? 1 : 0,
+                read_mod_bool("VR_ForceMotionControlsActive").has_value()
+                    ? "available" : "not exposed",
+                read_mod_float("VR_MotionControlsInactivityTimer").has_value()
+                    ? "available" : "not exposed");
+        }
+    }
+
+    void update_controller_gate_diagnostics(float delta) {
+        m_controller_gate_diagnostic_timer -= std::max(delta, 0.0f);
+        if (m_controller_gate_diagnostic_timer > 0.0f) {
+            return;
+        }
+        m_controller_gate_diagnostic_timer = 2.0f;
+
+        // This state is diagnostic, not part of the pose path. Sampling it at
+        // the same 0.5 Hz cadence as the settings watchdog avoids adding a
+        // UEVR controller-mode query to every engine tick.
+        const auto uevr_active = API::VR::is_using_contriollers();
+        const auto native_active =
+            g_tracking_valid.load(std::memory_order_acquire);
+        const auto native_while_gate_inactive = native_active && !uevr_active;
+        g_uevr_controller_gate_active.store(
+            uevr_active, std::memory_order_release);
+        g_native_tracking_while_uevr_gate_inactive.store(
+            native_while_gate_inactive, std::memory_order_release);
+
+        const auto gate_state = uevr_active ? 1 : 0;
+        if (gate_state != m_last_uevr_controller_gate_state) {
+            m_last_uevr_controller_gate_state = gate_state;
+            API::get()->log_info(
+                "HaloCEMotionControls: UEVR controller gate=%s; "
+                "native tracking=%s",
+                uevr_active ? "active" : "inactive",
+                native_active ? "valid" : "invalid");
+        }
+        if (native_while_gate_inactive &&
+            !m_native_while_gate_inactive_logged) {
+            m_native_while_gate_inactive_logged = true;
+            API::get()->log_info(
+                "HaloCEMotionControls: controller-gate diagnostic: the native "
+                "Halo tracking path still has an available snapshot while "
+                "UEVR controller mode is inactive (availability alone does "
+                "not prove pose freshness on official UEVR 1.05)");
+        }
     }
 
     void update_cutscene_2d_mode(bool desired) {
@@ -4388,8 +4553,13 @@ private:
             return;
         }
 
-        API::VR::set_mod_value(
-            "VR_2DScreenMode", m_cutscene_2d_restore_value);
+        // Restore only while the value is still the one this plugin set. A
+        // user or another plugin changing it during the cinematic owns the
+        // newer value and must not be overwritten on exit.
+        if (read_mod_bool("VR_2DScreenMode").value_or(false)) {
+            API::VR::set_mod_value(
+                "VR_2DScreenMode", m_cutscene_2d_restore_value);
+        }
         m_cutscene_2d_active = false;
         API::get()->log_info(
             "HaloCEMotionControls: cutscene comfort restored the previous "
@@ -4418,6 +4588,8 @@ private:
             config.right_stick_down_crouch, std::memory_order_release);
         g_menu_button_is_back.store(
             config.menu_button_is_back, std::memory_order_release);
+        g_prevent_controller_sleep.store(
+            config.prevent_controller_sleep, std::memory_order_release);
         g_cutscene_comfort_enabled.store(
             config.cutscene_comfort, std::memory_order_release);
         g_logical_aim_follower_enabled.store(
@@ -4460,7 +4632,7 @@ private:
             API::get()->log_info(
                 "HaloCEMotionControls: config applied enabled=%d hands=%s "
                 "dominant=%s movement=%s turn=%s cutscene_comfort=%d "
-                "logical_aim=%d",
+                "logical_aim=%d prevent_controller_sleep=%d",
                 enabled ? 1 : 0,
                 config.floating_hands ? "floating" : "anchored IK",
                 config.dominant_hand == halo_cevr::DominantHand::Left
@@ -4470,7 +4642,8 @@ private:
                     : config.turn_mode == halo_cevr::TurnMode::Smooth
                         ? "smooth" : "off",
                 config.cutscene_comfort ? 1 : 0,
-                config.logical_aim_follower ? 1 : 0);
+                config.logical_aim_follower ? 1 : 0,
+                config.prevent_controller_sleep ? 1 : 0);
             API::get()->log_info(
                 "HaloCEMotionControls: live config %ls; calibration %ls",
                 m_config_store.config_path().c_str(),
@@ -6310,7 +6483,13 @@ private:
     bool m_native_hook_attempted{};
     bool m_native_hooks_installed{};
     float m_engine_uptime{};
-    bool m_uevr_runtime_settings_applied{};
+    float m_uevr_settings_watchdog_timer{};
+    bool m_uevr_settings_initialized{};
+    std::optional<bool> m_force_active_restore_value{};
+    std::optional<float> m_inactivity_restore_value{};
+    float m_controller_gate_diagnostic_timer{};
+    int m_last_uevr_controller_gate_state{-1};
+    bool m_native_while_gate_inactive_logged{};
     bool m_cutscene_2d_active{};
     bool m_cutscene_2d_restore_value{};
     float m_discovery_timer{};

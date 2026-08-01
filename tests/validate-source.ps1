@@ -146,8 +146,13 @@ foreach ($token in $requiredLateTrackingTokens) {
 }
 
 $requiredOfficialUevrCompatibilityTokens = @(
-    'apply_uevr_runtime_compatibility_once',
+    'maintain_uevr_runtime_compatibility',
     'VR_MotionControlsInactivityTimer',
+    'VR_ForceMotionControlsActive',
+    'prevent_controller_sleep',
+    'is_using_contriollers',
+    'kStatusNativeTrackingWhileUevrGateInactive',
+    'restore_owned_no_sleep_settings',
     'update_cutscene_2d_mode',
     'VR_2DScreenMode',
     'm_cutscene_2d_restore_value',

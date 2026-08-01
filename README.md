@@ -277,9 +277,19 @@ UObjectHook_AttachLerpEnabled=false
 VR_MetaXROperatorEnabled=false
 ```
 
-The stock UEVR inactivity timer is raised to its supported maximum so a valid
-stationary controller (especially a simulated controller) is not discarded after
-30 seconds. With `cutscene_comfort=true` in `data\halo_motion_controls.cfg`, the
+`prevent_controller_sleep=true` in the live `halo_ce_vr.cfg` is the
+default. Meta XR Operator then keeps UEVR controller mode active indefinitely;
+stock praydog UEVR is kept at its supported 100-second maximum. Halo's native
+weapon-pose path reads OpenXR tracking independently of that stock input gate,
+so the weapon continues tracking during a long stationary interval and the next
+button or axis action wakes UEVR input immediately. A 0.5 Hz drift-only watchdog
+repairs these settings if a profile loads late or another plugin changes them.
+Operator's indefinite mode also makes UEVR prefer the VR controllers over a
+physical gamepad for input arbitration and haptics. Set
+`prevent_controller_sleep=false` to stop runtime enforcement; values changed by
+the plugin are then restored if the user or another plugin has not superseded
+them. Values already present in the UEVR profile remain profile-owned.
+With `cutscene_comfort=true` in the live `halo_ce_vr.cfg`, the
 native Halo cinematic detector also switches UEVR to 2D screen mode for the
 duration of a cinematic and restores the user's prior display mode afterward.
 
