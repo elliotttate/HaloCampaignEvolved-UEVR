@@ -6092,11 +6092,17 @@ private:
             halo_cevr::uevr_extensions::kCompositorQuadVisible;
         state.texture = m_world_reticle_render_target->to_handle();
         state.position = {target.x, target.y, target.z};
-        state.rotation = {
-            face_hmd.x,
-            face_hmd.y,
-            face_hmd.z,
-            face_hmd.w};
+        // BY FIELD NAME: UEVR_Quaternionf is declared {w,x,y,z} while our Quat
+        // is {x,y,z,w}, so a positional brace-init here cyclically shifts every
+        // component. The error is invisible when looking straight ahead (the
+        // shifted identity is a 180-degree roll, and the ring is rotationally
+        // symmetric) and pure-yaw offsets survive it by coincidence -- it only
+        // shows up as a facing skew at pitched aim, which a centre-position
+        // sweep cannot catch.
+        state.rotation.w = face_hmd.w;
+        state.rotation.x = face_hmd.x;
+        state.rotation.y = face_hmd.y;
+        state.rotation.z = face_hmd.z;
         state.size_meters = {
             reticle_texture_extent_meters,
             reticle_texture_extent_meters};
