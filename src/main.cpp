@@ -255,6 +255,10 @@ static_assert(offsetof(NativeObjectData, velocity) == 0x68);
 struct TrackingSnapshot {
     Vec3 hmd_position{};
     Quat hmd_rotation{};
+    // UEVR's recenter rotation offset, sampled with the poses. UEVR renders
+    // the view as game-camera * (this offset * hmd), so this is the exact
+    // rotation that maps a raw stage pose into the frame the player sees.
+    Quat stage_rotation{};
     Vec3 right_grip_position{};
     Quat right_grip_rotation{};
     Vec3 right_aim_position{};
@@ -403,6 +407,14 @@ std::atomic_bool g_mod_enabled{true};
 std::atomic_bool g_cinematic_active{};
 std::atomic_bool g_cutscene_comfort_enabled{true};
 std::atomic_bool g_dominant_hand_left{};
+// Stage-anchored aim composition (default). Halo's first-person palette root
+// is the stick-driven game camera and never contains the HMD rotation, while
+// UEVR renders the view as game-camera * (recenter-offset * hmd). Attaching
+// controller poses with the recenter offset therefore keeps the weapon glued
+// to the physical hand. The previous inverse-HMD composition cancelled a head
+// rotation the root never had, so every head turn swung the weapon the
+// opposite way. UEVR_HALO_HEAD_RELATIVE_AIM=1 restores that legacy math.
+std::atomic_bool g_stage_anchored_aim{true};
 std::atomic_bool g_head_relative_movement{true};
 std::atomic<float> g_movement_deadzone{0.12f};
 std::atomic_bool g_dpad_shift_enabled{true};
@@ -1138,6 +1150,16 @@ bool valid_openxr_pose(
 TrackingSnapshot capture_tracking_snapshot_raw() {
     TrackingSnapshot snapshot{};
 
+    if (API::VR::is_runtime_ready()) {
+        const auto offset = API::VR::get_rotation_offset();
+        const Quat stage_rotation{offset.x, offset.y, offset.z, offset.w};
+        if (finite(stage_rotation)) {
+            // normalized() of a degenerate value yields identity, which is
+            // also the correct offset before the first recenter.
+            snapshot.stage_rotation = normalized(stage_rotation);
+        }
+    }
+
     halo_cevr::uevr_extensions::LateTrackingSnapshot late{};
     if (API::VR::is_openxr() &&
         halo_cevr::uevr_extensions::get_late_tracking_snapshot(late) &&
@@ -1577,6 +1599,21 @@ Mat3 openxr_rotation_to_blam_basis(const Quat& rotation) {
         openxr_to_blam(rotate(rotation, {0.0f, 1.0f, 0.0f}))};
 }
 
+// Rotation composed onto raw stage poses before they are attached to Halo's
+// camera-derived palette root or view rotation. The root is the stick-driven
+// game camera with no HMD content, and UEVR renders the view as
+// game-camera * (recenter-offset * hmd); the recenter offset is therefore
+// the exact map from stage space onto that root. The legacy inverse-HMD
+// composition subtracted a head rotation the root never contained, which
+// made the weapon, muzzle, and projectiles counter-rotate against every
+// head turn.
+Quat aim_composition_rotation(const TrackingSnapshot& tracking) {
+    if (!g_stage_anchored_aim.load(std::memory_order_relaxed)) {
+        return conjugate(normalized(tracking.hmd_rotation));
+    }
+    return normalized(tracking.stage_rotation);
+}
+
 // The controller basis both the visual weapon and the native fire path aim
 // with. One-handed this is the right aim rotation as before. While the
 // two-handed hold is engaged, the forward axis eases onto the line from the
@@ -1584,9 +1621,11 @@ Mat3 openxr_rotation_to_blam_basis(const Quat& rotation) {
 // taken from the right controller. Sharing this one function between the
 // palette build and the marker/projectile hooks keeps the rendered barrel,
 // the muzzle ray, and the collision sweep on the same line while blending.
+// composition_rotation is aim_composition_rotation() for the same snapshot;
+// aim_relative_xr must already be composed with it.
 Mat3 effective_controller_basis(
     const TrackingSnapshot& tracking,
-    const Quat& inverse_hmd_rotation,
+    const Quat& composition_rotation,
     const Quat& aim_relative_xr) {
     const auto one_hand = openxr_rotation_to_blam_basis(aim_relative_xr);
     const auto blend =
@@ -1595,13 +1634,15 @@ Mat3 effective_controller_basis(
         return one_hand;
     }
 
-    // Hand-to-hand line in the same HMD-relative frame as the aim rotation.
-    // If left tracking drops mid-hold, ease the blend tail out along the
-    // last tracked line instead of snapping back to one-handed aim.
+    // Hand-to-hand line in the same composed frame as the aim rotation. If
+    // left tracking drops mid-hold, ease the blend tail out along the last
+    // tracked line instead of snapping back to one-handed aim. With the
+    // stage-anchored composition the latched line is stage-fixed, so head
+    // motion during the ease-out no longer drags the aim.
     Vec3 two_hand_forward{};
     if (tracking.left_valid) {
         const auto hand_line_xr = rotate(
-            inverse_hmd_rotation,
+            composition_rotation,
             tracking.left_grip_position - tracking.right_grip_position);
         two_hand_forward = openxr_to_blam(hand_line_xr);
         const auto line_length_squared = length_squared(two_hand_forward);
@@ -1686,18 +1727,18 @@ bool build_controller_marker(
         source.world.position -
         transform_vector(root_basis, source.local.position);
 
-    const auto inverse_hmd_rotation = conjugate(hmd_rotation);
+    const auto composition_rotation = aim_composition_rotation(tracking);
     const auto grip_delta_xr = rotate(
-        inverse_hmd_rotation,
+        composition_rotation,
         tracking.right_grip_position - tracking.hmd_position);
     const auto aim_relative_xr =
-        normalized(inverse_hmd_rotation * aim_rotation);
+        normalized(composition_rotation * aim_rotation);
     if (!finite(grip_delta_xr) || !finite(aim_relative_xr)) {
         return false;
     }
 
     const auto controller_basis = effective_controller_basis(
-        tracking, inverse_hmd_rotation, aim_relative_xr);
+        tracking, composition_rotation, aim_relative_xr);
     if (!valid_basis(controller_basis)) {
         return false;
     }
@@ -2271,18 +2312,18 @@ bool apply_split_controllers_to_first_person_palette(
         return false;
     }
 
-    const auto inverse_hmd_rotation = conjugate(hmd_rotation);
+    const auto composition_rotation = aim_composition_rotation(tracking);
     const auto grip_delta_xr = rotate(
-        inverse_hmd_rotation,
+        composition_rotation,
         tracking.right_grip_position - tracking.hmd_position);
     const auto aim_relative_xr =
-        normalized(inverse_hmd_rotation * aim_rotation);
+        normalized(composition_rotation * aim_rotation);
     if (!finite(grip_delta_xr) || !finite(aim_relative_xr)) {
         return false;
     }
 
     const auto controller_basis = effective_controller_basis(
-        tracking, inverse_hmd_rotation, aim_relative_xr);
+        tracking, composition_rotation, aim_relative_xr);
     if (!valid_basis(controller_basis)) {
         return false;
     }
@@ -2303,10 +2344,10 @@ bool apply_split_controllers_to_first_person_palette(
     }
 
     // The identity "primaryweapon" marker is authored on node 8. Construct
-    // its desired pose from the composed view root and HMD-relative
-    // controller pose, then derive one rigid left-delta for the whole weapon
-    // branch. This preserves stock animation within the branch and never
-    // touches the camera-control node.
+    // its desired pose from the camera-derived view root and the
+    // stage-composed controller pose, then derive one rigid left-delta for
+    // the whole weapon branch. This preserves stock animation within the
+    // branch and never touches the camera-control node.
     const auto desired_weapon_basis =
         multiply(root_basis, visual_weapon_basis);
     const auto grip_delta_blam =
@@ -2409,10 +2450,10 @@ bool apply_split_controllers_to_first_person_palette(
         const auto left_grip_rotation =
             normalized(tracking.left_grip_rotation);
         const auto left_grip_delta_xr = rotate(
-            inverse_hmd_rotation,
+            composition_rotation,
             tracking.left_grip_position - tracking.hmd_position);
         const auto left_relative_xr =
-            normalized(inverse_hmd_rotation * left_grip_rotation);
+            normalized(composition_rotation * left_grip_rotation);
         const auto left_controller_basis =
             openxr_rotation_to_blam_basis(left_relative_xr);
         // The stock wrist-to-view orientation is the constant that maps
@@ -2524,17 +2565,17 @@ bool apply_legacy_controller_to_first_person_palette(
         return false;
     }
 
-    const auto inverse_hmd_rotation = conjugate(hmd_rotation);
+    const auto composition_rotation = aim_composition_rotation(tracking);
     const auto grip_delta_xr = rotate(
-        inverse_hmd_rotation,
+        composition_rotation,
         tracking.right_grip_position - tracking.hmd_position);
     const auto aim_relative_xr =
-        normalized(inverse_hmd_rotation * aim_rotation);
+        normalized(composition_rotation * aim_rotation);
     // Share the two-hand-aware basis with the split path and the fire
     // hooks: this fallback must not render a one-handed weapon while the
     // native muzzle keeps following the hand-to-hand line.
     const auto controller_basis = effective_controller_basis(
-        tracking, inverse_hmd_rotation, aim_relative_xr);
+        tracking, composition_rotation, aim_relative_xr);
     const Mat3 visual_weapon_basis{
         controller_basis.left * -1.0f,
         controller_basis.forward,
@@ -4023,6 +4064,22 @@ public:
                 first != L'n' && first != L'o',
                 std::memory_order_release);
         }
+        std::array<wchar_t, 16> head_relative_setting{};
+        const auto head_relative_setting_length = GetEnvironmentVariableW(
+            L"UEVR_HALO_HEAD_RELATIVE_AIM",
+            head_relative_setting.data(),
+            static_cast<DWORD>(head_relative_setting.size()));
+        if (head_relative_setting_length > 0 &&
+            head_relative_setting_length < head_relative_setting.size()) {
+            const auto first = static_cast<wchar_t>(
+                std::towlower(head_relative_setting.front()));
+            // The variable requests the LEGACY head-relative composition, so
+            // a truthy value disables stage anchoring.
+            g_stage_anchored_aim.store(
+                first == L'0' || first == L'f' ||
+                first == L'n' || first == L'o',
+                std::memory_order_release);
+        }
         apply_configuration(true);
         const auto marker = reticle_active_marker_path();
         if (!marker.empty()) {
@@ -4051,6 +4108,12 @@ public:
                 ? "anchored-arm IK (yaw-only shoulders, clavicle assist, "
                   "exact wrists)"
                 : "floating hands (arms hidden)");
+        api->log_info(
+            "HaloCEMotionControls: aim composition is %s",
+            g_stage_anchored_aim.load(std::memory_order_relaxed)
+                ? "stage-anchored (recenter offset; head motion cannot move "
+                  "the weapon)"
+                : "legacy head-relative (UEVR_HALO_HEAD_RELATIVE_AIM)");
     }
 
     void on_pre_engine_tick(API::UGameEngine* engine, float delta) override {
@@ -5899,13 +5962,13 @@ private:
                 viewpoint_parameters,
                 L"Rotation");
 
-        const auto hmd_rotation = normalized(tracking.hmd_rotation);
         const auto aim_rotation = normalized(tracking.right_aim_rotation);
+        const auto composition_rotation = aim_composition_rotation(tracking);
         const auto aim_relative =
-            normalized(conjugate(hmd_rotation) * aim_rotation);
+            normalized(composition_rotation * aim_rotation);
         const auto controller_basis = effective_controller_basis(
             tracking,
-            conjugate(hmd_rotation),
+            composition_rotation,
             aim_relative);
         if (!valid_basis(controller_basis)) {
             return std::nullopt;
@@ -6045,13 +6108,12 @@ private:
             return;
         }
 
-        const auto hmd_rotation = normalized(tracking.hmd_rotation);
         const auto aim_rotation = normalized(tracking.right_aim_rotation);
-        const auto inverse_hmd_rotation = conjugate(hmd_rotation);
-        const auto aim_relative = normalized(inverse_hmd_rotation * aim_rotation);
+        const auto composition_rotation = aim_composition_rotation(tracking);
+        const auto aim_relative = normalized(composition_rotation * aim_rotation);
         const auto controller_basis = effective_controller_basis(
             tracking,
-            inverse_hmd_rotation,
+            composition_rotation,
             aim_relative);
         if (!valid_basis(controller_basis)) {
             clear_openxr_reticle_quad(true);
@@ -6059,14 +6121,15 @@ private:
         }
 
         // This is the inverse of openxr_to_blam(). Applying it to the shared
-        // controller basis gives the exact HMD-local ray used by the visual
-        // weapon, native marker hooks, projectile hooks, and world widget.
+        // controller basis, then undoing the composition rotation, recovers
+        // the exact stage-space ray used by the visual weapon, native marker
+        // hooks, projectile hooks, and world widget.
         const Vec3 local_direction_xr{
             -controller_basis.forward.y,
             controller_basis.forward.z,
             -controller_basis.forward.x};
         const auto stage_direction = normalized(
-            rotate(hmd_rotation, local_direction_xr));
+            rotate(conjugate(composition_rotation), local_direction_xr));
         if (!finite(stage_direction) ||
             length_squared(stage_direction) < 0.8f) {
             clear_openxr_reticle_quad(true);

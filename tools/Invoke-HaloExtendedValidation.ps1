@@ -19,7 +19,9 @@ param(
 
     [switch]$PlanOnly,
 
-    [switch]$InputOnly
+    [switch]$InputOnly,
+
+    [switch]$TwoHandAndFingersOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -34,8 +36,9 @@ if (-not $OutputDirectory) {
 $OutputDirectory = [System.IO.Path]::GetFullPath($OutputDirectory)
 
 $inventory = @(
-    [pscustomobject]@{ Id='HMD-01'; Cases=7; Scope='rig invariance plus head-only inverse-HMD yaw, pitch, translation' },
+    [pscustomobject]@{ Id='HMD-01'; Cases=7; Scope='rig co-rotation plus head-only weapon world-stability (stage-anchored)' },
     [pscustomobject]@{ Id='HAND-01'; Cases=5; Scope='tracked wrist and hand geometry at extreme poses' },
+    [pscustomobject]@{ Id='FINGER-01'; Cases=3; Scope='left hand open, closed, and reopened curl plus fingertip geometry' },
     [pscustomobject]@{ Id='TWO-01'; Cases=4; Scope='outside-zone, acquire, retained latch, release' },
     [pscustomobject]@{ Id='INP-01'; Cases=7; Scope='stick echo, bridge observation, D-pad modes, release state' }
 )
@@ -361,6 +364,27 @@ function Get-BasisMinimumDot {
     [Math]::Min($forwardDot, [Math]::Min($leftDot, $upDot))
 }
 
+function Get-RigRotatedBasisMinimumDot {
+    # Minimum per-axis dot between the actual Blam basis and the baseline
+    # basis rotated by the commanded stage rig rotation. Under the
+    # stage-anchored composition, rotating the whole rig (head plus both
+    # controllers) must rotate the weapon with it; a rig-yawed weapon that
+    # stays fixed in the world is glued to the head-relative frame instead.
+    param($Baseline,$Actual,$RigRotation)
+    $minimum = 1.0
+    foreach ($axis in @('forward','left','up')) {
+        $blam = ConvertTo-Vector3 $Baseline.$axis
+        # Inverse of Convert-OpenXRToBlam: blam(x,y,z) -> xr(-y, z, -x).
+        $xr = @((-[double]$blam[1]), ([double]$blam[2]), (-[double]$blam[0]))
+        $rotated = Convert-OpenXRToBlam (Rotate-Vector $RigRotation $xr)
+        $dot = Get-Dot `
+            (Normalize-Vector $rotated) `
+            (Normalize-Vector (ConvertTo-Vector3 $Actual.$axis))
+        if ($dot -lt $minimum) { $minimum = $dot }
+    }
+    $minimum
+}
+
 function Set-HeadPose {
     param($Position,$Orientation)
     $null = Invoke-OperatorJson 'openxr_set_head_pose' @{
@@ -411,20 +435,30 @@ function Wait-ForRigSample {
         }
         Start-Sleep -Milliseconds 40
     } while ([DateTime]::UtcNow -lt $deadline)
-    throw 'Timed out waiting for the commanded HMD/controller pose sample.'
+    $observed = Get-Status
+    $d = $observed.halo_motion_controls.pose_diagnostics
+    throw (
+        'Timed out waiting for the commanded HMD/controller pose sample. ' +
+        "Observed HMD=$((ConvertTo-Vector3 $d.hmd.position) -join ',') " +
+        "rightGrip=$((ConvertTo-Vector3 $d.right_grip.position) -join ',') " +
+        "rightAim=$((ConvertTo-Vector3 $d.right_aim.position) -join ',') " +
+        "leftGrip=$((ConvertTo-Vector3 $d.left_grip.position) -join ',').")
 }
 
 function Get-ExpectedWeaponMetrics {
     param($Diagnostics)
+    # Stage-anchored composition: the palette root is the stick-driven game
+    # camera, so controller poses attach through UEVR's recenter offset, not
+    # the inverse HMD. This harness never recenters, so the offset is
+    # identity and raw stage poses compose directly. The HMD rotation must
+    # not appear in this formula; if it does, head motion moves the weapon.
     $hmdPosition = ConvertTo-Vector3 $Diagnostics.hmd.position
-    $hmdRotation = ConvertTo-Quaternion $Diagnostics.hmd.rotation
     $gripPosition = ConvertTo-Vector3 $Diagnostics.right_grip.position
     $aimRotation = ConvertTo-Quaternion $Diagnostics.right_aim.rotation
     $rootPosition = ConvertTo-Vector3 $Diagnostics.root.position
     $rootBasis = Get-Basis $Diagnostics.root
-    $inverseHmd = Get-Conjugate $hmdRotation
-    $relativeGrip = Rotate-Vector $inverseHmd (Subtract-Vector $gripPosition $hmdPosition)
-    $relativeAim = Multiply-Quaternion $inverseHmd $aimRotation
+    $relativeGrip = Subtract-Vector $gripPosition $hmdPosition
+    $relativeAim = $aimRotation
     $controllerForward = Convert-OpenXRToBlam (
         Rotate-Vector $relativeAim @(0.0,0.0,-1.0))
     $expectedAim = Normalize-Vector (
@@ -497,6 +531,7 @@ try {
         key='VR_DPadShifting' }).value
 
     Set-ControllerInput left Grip 0.0
+    Set-ControllerInput left Trigger 0.0
     Set-ControllerInput right Trigger 0.0
     Set-ControllerInput left Thumbstick 0.0 X
     Set-ControllerInput left Thumbstick 0.0 Y
@@ -510,6 +545,7 @@ try {
         ([uint32]$before.halo_motion_controls.pose_diagnostics.sequence)
     $baseline = $baselineStatus.halo_motion_controls.pose_diagnostics
 
+    if (-not $TwoHandAndFingersOnly) {
     $rigCases = @(
         @{Name='rig_translate_xyz';Position=@(0.12,0.08,-0.10);Orientation=$identity},
         @{Name='rig_yaw_pos_20';Position=$baseHeadPosition;Orientation=(New-AxisQuaternion y 20)},
@@ -531,23 +567,25 @@ try {
         $d=$status.halo_motion_controls.pose_diagnostics
         $metrics=Get-ExpectedWeaponMetrics $d
         $values=@{
+            # Under the stage-anchored composition a rigidly rotated rig
+            # carries the weapon with it, so world-frame deltas versus the
+            # unrotated baseline are informational, not invariants.
             weapon_position_delta_m=3.048*(Get-Distance (ConvertTo-Vector3 $d.weapon.position) (ConvertTo-Vector3 $baseline.weapon.position))
             right_wrist_position_delta_m=3.048*(Get-Distance (ConvertTo-Vector3 $d.right_wrist.position) (ConvertTo-Vector3 $baseline.right_wrist.position))
             left_wrist_position_delta_m=3.048*(Get-Distance (ConvertTo-Vector3 $d.left_wrist.position) (ConvertTo-Vector3 $baseline.left_wrist.position))
             reticle_position_delta_m=3.048*(Get-Distance (ConvertTo-Vector3 $d.reticle_position) (ConvertTo-Vector3 $baseline.reticle_position))
-            weapon_basis_min_dot=Get-BasisMinimumDot $d.weapon $baseline.weapon
-            right_wrist_basis_min_dot=Get-BasisMinimumDot $d.right_wrist $baseline.right_wrist
-            left_wrist_basis_min_dot=Get-BasisMinimumDot $d.left_wrist $baseline.left_wrist
+            weapon_rig_rotated_basis_min_dot=Get-RigRotatedBasisMinimumDot $baseline.weapon $d.weapon $q
+            right_wrist_rig_rotated_basis_min_dot=Get-RigRotatedBasisMinimumDot $baseline.right_wrist $d.right_wrist $q
+            left_wrist_rig_rotated_basis_min_dot=Get-RigRotatedBasisMinimumDot $baseline.left_wrist $d.left_wrist $q
             weapon_position_formula_error_m=$metrics.weapon_position_error_m
             weapon_barrel_aim_dot=$metrics.weapon_barrel_aim_dot
         }
         $fail=[System.Collections.Generic.List[string]]::new()
-        if ($values.weapon_position_delta_m -gt 0.02) { $fail.Add('weapon was not rigid-rig invariant within 2 cm') }
-        if ($values.right_wrist_position_delta_m -gt 0.03) { $fail.Add('right wrist was not rigid-rig invariant within 3 cm') }
-        if ($values.left_wrist_position_delta_m -gt 0.03) { $fail.Add('left wrist was not rigid-rig invariant within 3 cm') }
-        if ($values.reticle_position_delta_m -gt 0.04) { $fail.Add('reticle was not rigid-rig invariant within 4 cm') }
-        if ($values.weapon_position_formula_error_m -gt 0.02) { $fail.Add('weapon disagreed with one inverse-HMD transform') }
-        if ($values.weapon_barrel_aim_dot -lt 0.98) { $fail.Add('weapon barrel disagreed with HMD-relative aim') }
+        if ($values.weapon_rig_rotated_basis_min_dot -lt 0.98) { $fail.Add('weapon did not rotate with the rigid rig') }
+        if ($values.right_wrist_rig_rotated_basis_min_dot -lt 0.98) { $fail.Add('right wrist did not rotate with the rigid rig') }
+        if ($values.left_wrist_rig_rotated_basis_min_dot -lt 0.98) { $fail.Add('left wrist did not rotate with the rigid rig') }
+        if ($values.weapon_position_formula_error_m -gt 0.02) { $fail.Add('weapon disagreed with the stage-anchored composition') }
+        if ($values.weapon_barrel_aim_dot -lt 0.98) { $fail.Add('weapon barrel disagreed with stage-anchored aim') }
         Add-CaseResult HMD-01 $case.Name $values $fail.ToArray()
     }
 
@@ -567,12 +605,21 @@ try {
         $values=@{
             weapon_position_formula_error_m=$metrics.weapon_position_error_m
             weapon_barrel_aim_dot=$metrics.weapon_barrel_aim_dot
-            relative_grip_delta_from_baseline_m=Get-Distance $metrics.relative_grip (ConvertTo-Vector3 $baseline.right_grip.position)
+            weapon_basis_min_dot_vs_baseline=Get-BasisMinimumDot $d.weapon $baseline.weapon
+            weapon_position_delta_vs_baseline_m=3.048*(Get-Distance (ConvertTo-Vector3 $d.weapon.position) (ConvertTo-Vector3 $baseline.weapon.position))
         }
         $fail=[System.Collections.Generic.List[string]]::new()
-        if ($values.weapon_position_formula_error_m -gt 0.02) { $fail.Add('weapon disagreed with one inverse-HMD transform') }
-        if ($values.weapon_barrel_aim_dot -lt 0.98) { $fail.Add('weapon barrel disagreed with HMD-relative aim') }
-        if ($values.relative_grip_delta_from_baseline_m -lt 0.03) { $fail.Add('head-only case did not produce a meaningful relative-pose change') }
+        if ($values.weapon_position_formula_error_m -gt 0.02) { $fail.Add('weapon disagreed with the stage-anchored composition') }
+        if ($values.weapon_barrel_aim_dot -lt 0.98) { $fail.Add('weapon barrel disagreed with stage-anchored aim') }
+        if ($case.Name -notlike 'head_only_translate*') {
+            # The direct regression test for "the weapon moves when I move my
+            # head": with the controllers fixed in stage space, a head-only
+            # rotation must leave the weapon's world pose untouched. This
+            # reads only recorded world matrices, so it cannot be satisfied
+            # by the formula the plugin itself computes.
+            if ($values.weapon_basis_min_dot_vs_baseline -lt 0.999) { $fail.Add('head-only rotation moved the weapon basis') }
+            if ($values.weapon_position_delta_vs_baseline_m -gt 0.005) { $fail.Add('head-only rotation moved the weapon position') }
+        }
         Add-CaseResult HMD-01 $case.Name $values $fail.ToArray()
     }
 
@@ -624,6 +671,68 @@ try {
         Add-CaseResult HAND-01 $case.Name $values $fail.ToArray() @(
             'Shoulder, elbow, clavicle, triangle stretch, and tracking-loss transitions are not exposed by status ABI v1.')
     }
+    }
+
+    # Exercise the actual palette output, not just Operator's input echo. The
+    # curl values are only published after apply_finger_openness succeeds, and
+    # the index-tip distance independently proves that the skinned finger
+    # geometry changed and returned to its open pose.
+    Set-ExplicitRig $baseHeadPosition $identity `
+        $baseRightGrip $baseRightAim $baseLeftGrip $baseLeftAim
+    Set-ControllerInput left Trigger 0.0
+    Set-ControllerInput left Grip 0.0
+    Start-Sleep -Milliseconds 450
+    $fingerOpen=Get-Status
+    $fingerOpenD=$fingerOpen.halo_motion_controls.pose_diagnostics
+    $fingerOpenFailures=[System.Collections.Generic.List[string]]::new()
+    if([double]$fingerOpenD.left_index_curl -gt 0.10){$fingerOpenFailures.Add('left index did not open')}
+    if([double]$fingerOpenD.left_grip_curl -gt 0.10){$fingerOpenFailures.Add('left grip fingers did not open')}
+    Add-CaseResult FINGER-01 open @{
+        left_index_curl=[double]$fingerOpenD.left_index_curl
+        left_grip_curl=[double]$fingerOpenD.left_grip_curl
+        left_thumb_curl=[double]$fingerOpenD.left_thumb_curl
+        left_index_tip_distance_blam=[double]$fingerOpenD.left_index_tip_distance_blam
+    } $fingerOpenFailures.ToArray()
+
+    Set-ControllerInput left Trigger 1.0
+    Set-ControllerInput left Grip 1.0
+    Start-Sleep -Milliseconds 350
+    $fingerClosed=Get-Status
+    $fingerClosedD=$fingerClosed.halo_motion_controls.pose_diagnostics
+    $fingerClosedFailures=[System.Collections.Generic.List[string]]::new()
+    if([double]$fingerClosedD.left_index_curl -lt 0.90){$fingerClosedFailures.Add('left index did not close')}
+    if([double]$fingerClosedD.left_grip_curl -lt 0.90){$fingerClosedFailures.Add('left grip fingers did not close')}
+    $fingerTravel=[Math]::Abs(
+        [double]$fingerOpenD.left_index_tip_distance_blam -
+        [double]$fingerClosedD.left_index_tip_distance_blam)
+    if($fingerTravel -lt 0.0001){$fingerClosedFailures.Add('left index-tip geometry did not move')}
+    Add-CaseResult FINGER-01 closed @{
+        left_index_curl=[double]$fingerClosedD.left_index_curl
+        left_grip_curl=[double]$fingerClosedD.left_grip_curl
+        left_thumb_curl=[double]$fingerClosedD.left_thumb_curl
+        left_index_tip_distance_blam=[double]$fingerClosedD.left_index_tip_distance_blam
+        index_tip_travel_blam=$fingerTravel
+    } $fingerClosedFailures.ToArray()
+
+    Set-ControllerInput left Trigger 0.0
+    Set-ControllerInput left Grip 0.0
+    Start-Sleep -Milliseconds 500
+    $fingerReopened=Get-Status
+    $fingerReopenedD=$fingerReopened.halo_motion_controls.pose_diagnostics
+    $fingerReopenFailures=[System.Collections.Generic.List[string]]::new()
+    if([double]$fingerReopenedD.left_index_curl -gt 0.10){$fingerReopenFailures.Add('left index did not reopen')}
+    if([double]$fingerReopenedD.left_grip_curl -gt 0.10){$fingerReopenFailures.Add('left grip fingers did not reopen')}
+    $fingerReturnError=[Math]::Abs(
+        [double]$fingerOpenD.left_index_tip_distance_blam -
+        [double]$fingerReopenedD.left_index_tip_distance_blam)
+    if($fingerReturnError -gt 0.001){$fingerReopenFailures.Add('left index-tip geometry did not return to the open pose')}
+    Add-CaseResult FINGER-01 reopened @{
+        left_index_curl=[double]$fingerReopenedD.left_index_curl
+        left_grip_curl=[double]$fingerReopenedD.left_grip_curl
+        left_thumb_curl=[double]$fingerReopenedD.left_thumb_curl
+        left_index_tip_distance_blam=[double]$fingerReopenedD.left_index_tip_distance_blam
+        index_tip_return_error_blam=$fingerReturnError
+    } $fingerReopenFailures.ToArray()
 
     Set-ControllerInput left Grip 0.0
     $seq=[uint32](Get-Status).halo_motion_controls.pose_diagnostics.sequence
@@ -638,15 +747,20 @@ try {
         two_hand_hold_active=[bool]$outside.halo_motion_controls.two_hand_hold_active
     } @($(if([bool]$outside.halo_motion_controls.two_hand_hold_active){'hold latched outside acquisition zone'}))
     Set-ControllerInput left Grip 0.0
+    Start-Sleep -Milliseconds 150
 
-    $insidePosition=@(0.30,-0.33,-0.81)
+    # Six centimetres off the right-hand aim ray is inside the nine-centimetre
+    # acquisition cylinder, but far enough off-axis to prove that two-hand
+    # aim actually changes rather than accidentally matching one-hand aim.
+    $insidePosition=@(0.36,-0.33,-0.81)
     $insideGrip=New-Pose $insidePosition $identity
     $insideAim=New-Pose (Add-Vector $insidePosition @(0.0,0.03,-0.095)) $identity
     $seq=[uint32](Get-Status).halo_motion_controls.pose_diagnostics.sequence
     Set-ExplicitRig $baseHeadPosition $identity `
         $baseRightGrip $baseRightAim $insideGrip $insideAim
-    $null=Wait-ForRigSample $baseHeadPosition $identity `
+    $unlatchedInside=Wait-ForRigSample $baseHeadPosition $identity `
         $baseRightGrip $baseRightAim $insideGrip $insideAim $seq
+    $oneHandBasis=Get-Basis $unlatchedInside.halo_motion_controls.pose_diagnostics.weapon
     Set-ControllerInput left Grip 1.0
     Start-Sleep -Milliseconds 350
     $latched=Get-Status
@@ -654,38 +768,64 @@ try {
         Subtract-Vector $insidePosition $baseRightGrip.Position))
     $weaponBasis=Get-Basis $latched.halo_motion_controls.pose_diagnostics.weapon
     $lineDot=Get-Dot (Normalize-Vector $weaponBasis.Left) $expectedTwoHand
+    $oneToTwoDot=Get-Dot `
+        (Normalize-Vector $oneHandBasis.Left) `
+        (Normalize-Vector $weaponBasis.Left)
     $hideMarker=Get-TextMarker 'halo_motion_reticle_hide.active'
     $acquireFailures=[System.Collections.Generic.List[string]]::new()
     if(-not [bool]$latched.halo_motion_controls.two_hand_hold_active){$acquireFailures.Add('hold did not latch inside acquisition zone')}
     if($lineDot -lt 0.98){$acquireFailures.Add('weapon barrel did not converge on hand-to-hand basis')}
+    if($oneToTwoDot -gt 0.997){$acquireFailures.Add('two-hand aim did not measurably diverge from one-hand aim')}
     if($hideMarker -ne 'on'){$acquireFailures.Add("reticle hide marker was '$hideMarker'")}
     Add-CaseResult TWO-01 acquire_and_basis @{
         two_hand_hold_active=[bool]$latched.halo_motion_controls.two_hand_hold_active
-        weapon_hand_line_dot=$lineDot; reticle_hide_marker=$hideMarker
+        weapon_hand_line_dot=$lineDot
+        one_hand_vs_two_hand_forward_dot=$oneToTwoDot
+        reticle_hide_marker=$hideMarker
     } $acquireFailures.ToArray()
 
-    Set-ControllerPose left grip $baseLeftGrip.Position $baseLeftGrip.Orientation
-    Set-ControllerPose left aim $baseLeftAim.Position $baseLeftAim.Orientation
-    Start-Sleep -Milliseconds 200
+    # Move well outside the acquisition cylinder while retaining grip. The
+    # latch must persist and the barrel must continue following the new hand
+    # line, which proves this is true two-hand aiming rather than a one-shot
+    # acquisition flag.
+    $retainedPosition=@(0.48,-0.33,-0.81)
+    Set-ControllerPose left grip $retainedPosition $identity
+    Set-ControllerPose left aim (Add-Vector $retainedPosition @(0.0,0.03,-0.095)) $identity
+    Start-Sleep -Milliseconds 300
     $retained=Get-Status
+    $expectedRetained=Normalize-Vector (Convert-OpenXRToBlam (
+        Subtract-Vector $retainedPosition $baseRightGrip.Position))
+    $retainedBasis=Get-Basis $retained.halo_motion_controls.pose_diagnostics.weapon
+    $retainedLineDot=Get-Dot (Normalize-Vector $retainedBasis.Left) $expectedRetained
+    $retainedFailures=[System.Collections.Generic.List[string]]::new()
+    if(-not [bool]$retained.halo_motion_controls.two_hand_hold_active){$retainedFailures.Add('latched hold did not persist outside zone while grip remained held')}
+    if($retainedLineDot -lt 0.98){$retainedFailures.Add('retained two-hand barrel stopped following the hand-to-hand line')}
     Add-CaseResult TWO-01 retained_outside_zone @{
         two_hand_hold_active=[bool]$retained.halo_motion_controls.two_hand_hold_active
-    } @($(if(-not [bool]$retained.halo_motion_controls.two_hand_hold_active){'latched hold did not persist outside zone while grip remained held'}))
+        weapon_hand_line_dot=$retainedLineDot
+    } $retainedFailures.ToArray()
 
     Set-ControllerInput left Grip 0.0
     Start-Sleep -Milliseconds 250
     $released=Get-Status
     $releaseMarker=Get-TextMarker 'halo_motion_reticle_hide.active'
+    $releasedBasis=Get-Basis $released.halo_motion_controls.pose_diagnostics.weapon
+    $releasedOneHandDot=Get-Dot `
+        (Normalize-Vector $releasedBasis.Left) `
+        (Normalize-Vector $oneHandBasis.Left)
     $releaseFailures=[System.Collections.Generic.List[string]]::new()
     if([bool]$released.halo_motion_controls.two_hand_hold_active){$releaseFailures.Add('hold remained active after grip release')}
+    if($releasedOneHandDot -lt 0.995){$releaseFailures.Add('weapon did not return to one-hand aim after grip release')}
     if($releaseMarker -ne 'off'){$releaseFailures.Add("reticle hide marker remained '$releaseMarker'")}
     Add-CaseResult TWO-01 release @{
         two_hand_hold_active=[bool]$released.halo_motion_controls.two_hand_hold_active
+        released_weapon_one_hand_dot=$releasedOneHandDot
         reticle_hide_marker=$releaseMarker
     } $releaseFailures.ToArray() @(
         'Pause, zoom, disable, tracking-loss release and grenade masking lack objective live ABI outputs.')
     }
 
+    if (-not $TwoHandAndFingersOnly) {
     foreach($dpadMode in @($true,$false)) {
         $null=Invoke-OperatorJson 'UEVR_SetConfig' @{
             key='VR_DPadShifting'; value=($dpadMode.ToString().ToLower()); save=$false
@@ -763,6 +903,7 @@ try {
         released_observed=(-not [bool]$triggerReleased.input.right_trigger)
     } $triggerFailures.ToArray() @(
         'A/B/X/Y/Menu and physical-gamepad merge state are not exposed by the current status ABI.')
+    }
 } catch {
     $fatal = @(
         $_.Exception.ToString(),
@@ -770,6 +911,7 @@ try {
         $_.ScriptStackTrace) -join [Environment]::NewLine
 } finally {
     try { Set-ControllerInput left Grip 0.0 } catch {}
+    try { Set-ControllerInput left Trigger 0.0 } catch {}
     try { Set-ControllerInput right Trigger 0.0 } catch {}
     try { Set-ControllerInput left Thumbstick 0.0 X } catch {}
     try { Set-ControllerInput left Thumbstick 0.0 Y } catch {}
@@ -820,7 +962,7 @@ try {
 
 $caseArray=@($script:results)
 $gates=@()
-foreach($id in @('HMD-01','HAND-01','TWO-01','INP-01')) {
+foreach($id in @('HMD-01','HAND-01','FINGER-01','TWO-01','INP-01')) {
     $cases=@($caseArray | Where-Object id -eq $id)
     $failed=@($cases | Where-Object { -not $_.passed })
     $classification = if($fatal){'not_run_fatal'}elseif($cases.Count -eq 0){'not_run'}elseif($failed.Count -gt 0){'failed'}elseif($id -eq 'HMD-01'){'passed'}else{'partial_pass_abi_gaps'}

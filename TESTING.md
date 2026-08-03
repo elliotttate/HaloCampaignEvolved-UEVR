@@ -222,14 +222,20 @@ tests.
 ### 4. HMD/controller independence
 
 This is the regression test for hands moving opposite the player's head.
+The plugin composes raw stage poses with UEVR's recenter rotation offset
+(never the inverse HMD): the palette root is the stick-driven game camera
+with no HMD content, so any HMD term in the weapon formula converts head
+motion into weapon motion.
 
 1. Record HMD, both controller poses, weapon, both wrists, and reticle.
 2. Apply the same rigid translation and rotation to the HMD and both
-   controllers. View-relative weapon, wrists, and reticle must remain stable
-   within 5 mm and 1 degree.
+   controllers. The weapon and wrists must rotate with the rig (world-frame
+   basis rotated by the rig rotation within 1 degree), keeping view-relative
+   placement stable within 5 mm and 1 degree.
 3. Move only the HMD while controllers remain fixed in tracking space. The
-   view-relative result must contain exactly one inverse-HMD transform, never
-   zero and never twice.
+   weapon's world pose must not change at all (basis dot at least 0.999,
+   position within 5 mm), and the view-relative result must contain exactly
+   one inverse-HMD transform, never zero and never twice.
 4. Repeat ±yaw, ±pitch, ±roll, ±X/Y/Z, and two compound transforms.
 5. Repeat with the simulator's `Controllers Follow: Head` policy to prove a
    carried player rig stays visually stable.

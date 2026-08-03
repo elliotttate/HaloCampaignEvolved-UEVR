@@ -176,13 +176,22 @@ controller/head pitch. Flattening is retained only when UEVR's decoupled-pitch
 mode is deliberately enabled. Attachment interpolation is disabled for this
 profile so the reticle and weapon do not visibly trail rapid controller moves.
 
-Both UEVR and the native plugin intentionally calculate controller poses
-relative to the HMD. In Meta XR Simulator, use **Plugins → Input →
+The native plugin anchors controller poses in tracking (stage) space using
+UEVR's recenter rotation offset. Halo's first-person palette root is the
+stick-driven game camera and never contains the HMD rotation, while UEVR
+renders the view as game-camera times offset-corrected HMD; composing raw
+stage poses with that same recenter offset is what keeps the weapon glued to
+the physical hand. The older inverse-HMD composition subtracted a head
+rotation the palette root never had, which made the weapon, muzzle, and
+projectiles counter-rotate against every head turn. Set
+`UEVR_HALO_HEAD_RELATIVE_AIM=1` before launch to restore that legacy
+composition for comparison. In Meta XR Simulator, use **Plugins → Input →
 Controllers Follow: Head** for a head-carried player-rig test. **Body**, or
 controller poses still owned by Meta XR Operator from the current XR session,
 keeps the controllers fixed in tracking space; moving only the simulated head
-then correctly makes the hands move oppositely in the view. End the XR session
-before switching from Operator-owned poses back to the Input plugin.
+must then leave the weapon's world pose untouched while the hands move
+oppositely in the view. End the XR session before switching from
+Operator-owned poses back to the Input plugin.
 
 Reticle creation is also gated by
 `data\halo_motion_gameplay.active`. The native plugin writes `ready` only
