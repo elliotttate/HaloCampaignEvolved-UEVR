@@ -238,8 +238,8 @@ local function draw_panel()
 
     imgui.text("")
     imgui.text("-- Advanced --")
-    draw_checkbox("Waypoints anchored in world (HUD head-compensation)",
-                  "hud_waypoint_fix", true)
+    draw_checkbox("Waypoints anchored in world (experimental, perf cost)",
+                  "hud_waypoint_fix", false)
     draw_checkbox("Logical aim follower (game aim tracks controller)",
                   "logical_aim_follower", false)
 end

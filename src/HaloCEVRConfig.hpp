@@ -47,7 +47,7 @@ struct RuntimeConfig {
     // The game projects waypoints with its own camera while UEVR's HUD quad
     // follows the head, so without this the markers ride the player's head
     // instead of staying over their world targets.
-    bool hud_waypoint_fix{true};
+    bool hud_waypoint_fix{false};
 
     // Free-hand orientation trim for the tracked support hand, degrees in
     // the controller's own frame. The bone convention is latched from the

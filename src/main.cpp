@@ -472,6 +472,14 @@ std::mutex g_calibration_mutex{};
 halo_cevr::PoseOffset g_controller_calibration{};
 halo_cevr::PoseOffset g_weapon_calibration{};
 
+// Instrumentation for weapons whose fire path bypasses the accepted muzzle
+// marker call site: those fire stock (screen-center) and feel offset from
+// the hand ray. Reset at each outermost local fire; summarized after it.
+std::atomic<std::uint32_t> g_unmatched_marker_calls{};
+std::atomic<std::uintptr_t> g_last_unmatched_marker_return{};
+std::atomic<std::int16_t> g_last_unmatched_marker_max{};
+std::atomic<std::int16_t> g_last_unmatched_marker_count{};
+
 TriggerCreateProjectilesFn g_original_trigger_create_projectiles{};
 GetMarkersFn g_original_get_markers{};
 ProjectileNewFn g_original_projectile_new{};
@@ -2906,9 +2914,25 @@ std::int16_t hook_get_markers(
         g_cinematic_active.load(std::memory_order_acquire) ||
         !g_native_override_enabled.load(std::memory_order_relaxed) ||
         g_local_zoomed.load(std::memory_order_acquire) ||
-        g_local_fire_depth == 0 || return_address != g_primary_marker_return ||
+        g_local_fire_depth == 0) {
+        return count;
+    }
+    if (return_address != g_primary_marker_return ||
         maximum_count != 64 || output == nullptr || count <= 0 ||
         count > static_cast<std::int16_t>(maximum_count)) {
+        // A local fire consulted markers through a call site or shape this
+        // filter does not accept — that weapon then fires completely stock
+        // (screen-center aim, wrong offset from the hand ray). Record what
+        // was seen so the outer fire hook can name the divergent path.
+        g_unmatched_marker_calls.fetch_add(1, std::memory_order_relaxed);
+        g_last_unmatched_marker_return.store(
+            reinterpret_cast<std::uintptr_t>(return_address),
+            std::memory_order_relaxed);
+        g_last_unmatched_marker_max.store(
+            static_cast<std::int16_t>(maximum_count),
+            std::memory_order_relaxed);
+        g_last_unmatched_marker_count.store(
+            count, std::memory_order_relaxed);
         return count;
     }
 
@@ -3358,6 +3382,7 @@ std::int16_t hook_trigger_create_projectiles(
     if (outermost_local_fire) {
         g_local_fire_marker_correction_count = 0;
         g_local_projectile_direction_override_count = 0;
+        g_unmatched_marker_calls.store(0, std::memory_order_relaxed);
         g_local_fire_tracking = capture_tracking_snapshot();
         if (g_local_fire_tracking.valid) {
             publish_tracking_snapshot(g_local_fire_tracking);
@@ -3380,6 +3405,38 @@ std::int16_t hook_trigger_create_projectiles(
         --g_local_fire_depth;
     }
     if (outermost_local_fire) {
+        // A local fire that produced no muzzle correction fired stock. Name
+        // the divergent marker call so the weapon can be brought into the
+        // corrected path — the site RVA logged here is the candidate to add
+        // beside g_primary_marker_return.
+        if (g_local_fire_marker_correction_count == 0) {
+            static std::atomic<std::uint32_t> logged{};
+            if (logged.fetch_add(1, std::memory_order_relaxed) < 16) {
+                const auto unmatched =
+                    g_unmatched_marker_calls.load(std::memory_order_relaxed);
+                const auto site =
+                    g_last_unmatched_marker_return.load(
+                        std::memory_order_relaxed);
+                const auto site_rva =
+                    g_simulation_module != nullptr &&
+                    site >= reinterpret_cast<std::uintptr_t>(
+                        g_simulation_module)
+                        ? site - reinterpret_cast<std::uintptr_t>(
+                              g_simulation_module)
+                        : site;
+                API::get()->log_info(
+                    "HaloCEMotionControls: local fire weapon=0x%08x got NO "
+                    "muzzle correction (fires stock). Unmatched marker "
+                    "calls=%u last_site_rva=0x%zx max=%d count=%d",
+                    weapon_object_index,
+                    unmatched,
+                    static_cast<std::size_t>(site_rva),
+                    static_cast<int>(g_last_unmatched_marker_max.load(
+                        std::memory_order_relaxed)),
+                    static_cast<int>(g_last_unmatched_marker_count.load(
+                        std::memory_order_relaxed)));
+            }
+        }
         g_local_fire_marker_correction_count = 0;
         g_local_projectile_direction_override_count = 0;
         g_local_fire_tracking = {};
@@ -5810,6 +5867,7 @@ private:
             set_world_reticle_main_pass(true);
             m_world_reticle_main_pass_disabled = false;
         }
+        m_world_reticle_pass_component = nullptr;
     }
 
     void log_reticle_state(int state, const char* message) {
@@ -6639,10 +6697,16 @@ private:
         // Keep the WidgetComponent rendering its 250x250 target, but remove
         // its mesh from the Unreal main pass. This eliminates the old grey
         // plane/cylinder without suppressing the live authored pixels copied
-        // into the compositor swapchain.
-        if (!m_world_reticle_main_pass_disabled &&
+        // into the compositor swapchain. Keyed on the COMPONENT IDENTITY,
+        // not a latched boolean: the component can be recreated without a
+        // pawn change (render-target replacement, level scripting), and a
+        // fresh component starts back in the main pass — with only a latched
+        // flag it then stayed visible as a second, black, tick-rate reticle
+        // jumping around beside the live quad.
+        if (m_world_reticle_pass_component != m_world_reticle_component &&
             set_world_reticle_main_pass(false)) {
             m_world_reticle_main_pass_disabled = true;
+            m_world_reticle_pass_component = m_world_reticle_component;
             API::get()->log_info(
                 "HaloCEMotionControls: dedicated OpenXR reticle quad active; "
                 "world WidgetComponent geometry removed from the main pass");
@@ -7026,6 +7090,9 @@ private:
     std::uint32_t m_uobject_discovery_failures{};
     API::UObject* m_reticle_owner{};
     API::UObject* m_world_reticle_component{};
+    // The exact component instance whose main-pass rendering the quad path
+    // disabled; a recreated component compares unequal and gets re-disabled.
+    API::UObject* m_world_reticle_pass_component{};
     // HUD navpoint compensation cache. The containers belong to the HUD's
     // WBP_Navpoints widget; the game positions individual markers via their
     // own RenderTransforms but never touches these containers, so a container
