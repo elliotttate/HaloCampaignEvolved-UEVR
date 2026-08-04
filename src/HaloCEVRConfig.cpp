@@ -210,6 +210,17 @@ RuntimeConfig parse_runtime_config(std::string_view text) {
     result.reticle_extent_meters = as_float(
         values, "reticle_extent_meters", result.reticle_extent_meters,
         0.02f, 20.0f);
+    result.hud_waypoint_fix = as_bool(
+        values, "hud_waypoint_fix", result.hud_waypoint_fix);
+    result.left_hand_pitch_degrees = as_float(
+        values, "left_hand_pitch_degrees", result.left_hand_pitch_degrees,
+        -180.0f, 180.0f);
+    result.left_hand_yaw_degrees = as_float(
+        values, "left_hand_yaw_degrees", result.left_hand_yaw_degrees,
+        -180.0f, 180.0f);
+    result.left_hand_roll_degrees = as_float(
+        values, "left_hand_roll_degrees", result.left_hand_roll_degrees,
+        -180.0f, 180.0f);
     result.controller_calibration_key = as_uint(
         values, "controller_calibration_key", result.controller_calibration_key);
     result.weapon_calibration_key = as_uint(
@@ -266,8 +277,17 @@ std::string default_runtime_config_text() {
         "logical_aim_deadzone_degrees=0.8\n"
         "logical_aim_full_scale_degrees=7.0\n"
         "logical_aim_minimum_output=0.26\n\n"
-        "reticle_distance_meters=10.0\n"
+        "reticle_distance_meters=20.0\n"
         "reticle_extent_meters=2.5\n\n"
+        "# Keep HUD waypoints anchored over their world targets instead of\n"
+        "# riding the head-locked HUD.\n"
+        "hud_waypoint_fix=true\n\n"
+        "# Free support-hand orientation trim, degrees in the controller's own\n"
+        "# frame. Live-reloaded: adjust while in the headset until the hand\n"
+        "# sits naturally on the controller.\n"
+        "left_hand_pitch_degrees=0\n"
+        "left_hand_yaw_degrees=0\n"
+        "left_hand_roll_degrees=0\n\n"
         "# Windows virtual-key values: End, PageDown, Home.\n"
         "controller_calibration_key=0x23\n"
         "weapon_calibration_key=0x22\n"

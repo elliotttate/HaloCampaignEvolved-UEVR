@@ -89,6 +89,15 @@ The launcher starts Steam AppID 2806050 without focusing Halo and uses the
 official `--attach=HaloCampaignEvolved.exe` injection path. Select the desired
 OpenXR runtime, including Meta XR Simulator, before running it.
 
+This is still a normal Steam launch: the launcher asks the running Steam client
+to start AppID 2806050. It also starts a hidden exit watchdog for the exact Halo
+process. If Halo exits but Steam fails to remove that PID from its running-game
+bookkeeping, the watchdog waits for any other Steam game to close, restarts
+Steam cleanly, and clears the permanent **Stopping** state. Pass
+`-ForceSteamExitRecovery` if the watchdog may force-close only Steam and its web
+helpers when Steam ignores its normal shutdown request. The watchdog never
+terminates an unrelated game.
+
 The native DLL advertises UEVR plugin API 2.34 and uses only official public
 pose/input functions for normal play. Optional API 2.40-2.43 calls are detected
 at runtime and used only for enhanced diagnostics, lower-latency pose sampling,
@@ -124,9 +133,10 @@ over subsequently edited files.
 
 ## Troubleshooting
 
-- **Steam says Halo is already running:** check Task Manager for
-  `HaloCampaignEvolved.exe` or its crash reporter and exit the stale process
-  before retrying. The launcher will not inject into an ambiguous old session.
+- **Steam says Halo is already running:** use `Start-HaloCEVR.ps1` for future
+  sessions so its exit watchdog can repair Steam's stale AppID state. If the
+  current session predates the watchdog, exit and restart Steam once. The
+  launcher will not inject into an ambiguous old Halo process.
 - **No controller movement:** confirm the desired OpenXR runtime is active and
   that the profile contains `VR_ControllersAllowed=true` and
   `VR_MotionControlsInactivityTimer=100.000000`. The legacy

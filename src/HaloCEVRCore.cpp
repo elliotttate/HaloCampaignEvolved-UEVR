@@ -202,9 +202,22 @@ HandChannels visual_hand_channels(const HandChannels& physical_left,
     result.index = std::clamp(result.index, 0.0f, 1.0f);
     result.grip = std::clamp(result.grip, 0.0f, 1.0f);
     result.thumb = std::clamp(result.thumb, 0.0f, 1.0f);
-    if (!visual_right_hand && support_hold_active) {
+    if (visual_right_hand) {
+        // The visual right hand is always the weapon hand, and a hand
+        // holding a weapon is holding it: keep it wrapped around the grip
+        // regardless of the physical grip button, with the index at least
+        // resting on the trigger. The live trigger pull still closes the
+        // index further.
         result.grip = 1.0f;
         result.thumb = 1.0f;
+        result.index = std::max(result.index, 0.6f);
+    }
+    if (!visual_right_hand && support_hold_active) {
+        // Two-hand hold: the support hand is wrapped around the barrel, so
+        // the whole fist closes, index included.
+        result.grip = 1.0f;
+        result.thumb = 1.0f;
+        result.index = std::max(result.index, 0.9f);
     }
     result.thumb = std::max(result.thumb, result.grip);
     return result;

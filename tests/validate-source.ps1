@@ -189,7 +189,7 @@ foreach ($token in $requiredLocomotionTokens) {
 }
 
 $requiredBallisticTokens = @(
-    'kReticleDistanceMeters',
+    'g_reticle_distance_meters.load',
     'reticle_position - destination.position',
     'direction_override->reticle_position - *start',
     'primary_sweep_consumed',

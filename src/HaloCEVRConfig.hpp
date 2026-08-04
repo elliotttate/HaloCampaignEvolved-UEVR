@@ -36,8 +36,27 @@ struct RuntimeConfig {
     float logical_aim_full_scale_degrees{7.0f};
     float logical_aim_minimum_output{0.26f};
 
-    float reticle_distance_meters{10.0f};
+    // Shared convergence AND display distance: the muzzle ray, projectile,
+    // collision sweep, and the visible ring all meet at this range. Longer
+    // shrinks both the ring's apparent size and the far-field droop bullets
+    // pick up past the convergence point.
+    float reticle_distance_meters{20.0f};
     float reticle_extent_meters{2.5f};
+
+    // Counter-rotate the HUD navpoint/waypoint container against head look.
+    // The game projects waypoints with its own camera while UEVR's HUD quad
+    // follows the head, so without this the markers ride the player's head
+    // instead of staying over their world targets.
+    bool hud_waypoint_fix{true};
+
+    // Free-hand orientation trim for the tracked support hand, degrees in
+    // the controller's own frame. The bone convention is latched from the
+    // stock animation, which holds the support hand in its on-weapon grip;
+    // these dials let the free-floating hand be straightened live from the
+    // headset (the config reloads within ~2 seconds).
+    float left_hand_pitch_degrees{0.0f};
+    float left_hand_yaw_degrees{0.0f};
+    float left_hand_roll_degrees{0.0f};
 
     std::uint32_t controller_calibration_key{0x23}; // End
     std::uint32_t weapon_calibration_key{0x22}; // Page Down

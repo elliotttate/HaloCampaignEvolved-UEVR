@@ -318,6 +318,9 @@ That path launches Halo through Steam and starts praydog's official auto-attach
 injector without selecting or changing the system OpenXR runtime. Runtime
 behavior comes only from official UEVR, the native profile plugin, and the Lua
 reticle. Meta XR Operator remains an optional development and validation tool.
+The launcher also watches the exact Halo process and cleanly restarts Steam only
+when Halo has exited but Steam has failed to clear AppID 2806050. Recovery waits
+while any other Steam game is still running.
 
 Both launchers also rewrite all three saved UEVR camera presets so their
 `decoupled_pitch` and `decoupled_pitch_ui_adjust` values remain false after a

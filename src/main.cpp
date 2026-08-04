@@ -375,14 +375,24 @@ std::atomic_uintptr_t g_attached_component{};
 std::atomic_bool g_two_hand_ik_enabled{true};
 std::atomic_bool g_two_hand_ik_fallback_logged{};
 // Fixed controller-to-wrist axis convention for the left hand, latched from
-// the stock palette on the first tracked frame after each weapon change.
-// Reading it every frame let the running stock animation rotate the tracked
-// hand; latching per weapon keeps it the constant mapping it was always
-// meant to be. The matrix is written and read only on the first-person
+// the stock palette once per weapon. Reading it every frame let the running
+// stock animation rotate the tracked hand; latching keeps it the constant
+// mapping it was always meant to be. The latch additionally waits for the
+// stock pose to SETTLE: the first tracked frame after a weapon change is
+// mid raise/draw animation, and latching there baked a transient swing into
+// the mapping — the free hand then sat rotated and offset oddly for that
+// whole weapon. The matrices are written and read only on the first-person
 // build thread; the flag is atomic because the tick thread clears it when
 // the local weapon index changes.
 Mat3 g_left_wrist_stock_relative{};
+Mat3 g_left_wrist_stock_candidate{};
+int g_left_wrist_stable_frames{};
 std::atomic_bool g_left_wrist_stock_latched{};
+// Support-hand orientation trim (degrees, controller frame) from the live
+// config, so the free hand can be straightened from inside the headset.
+std::atomic<float> g_left_hand_trim_pitch{};
+std::atomic<float> g_left_hand_trim_yaw{};
+std::atomic<float> g_left_hand_trim_roll{};
 // Two-handed hold state. The latch is decided once per engine tick from the
 // published tracking snapshot plus the left grip action; the blend eases the
 // weapon between one- and two-handed aim and is read by both the palette
@@ -429,6 +439,9 @@ std::atomic<float> g_logical_aim_x{};
 std::atomic<float> g_logical_aim_y{};
 std::atomic<float> g_reticle_distance_meters{10.0f};
 std::atomic<float> g_reticle_extent_meters{2.5f};
+// Counter-offset the HUD navpoint container against head look (the game
+// projects waypoints with its camera; UEVR's HUD quad follows the head).
+std::atomic_bool g_hud_waypoint_fix{true};
 // Physical controller input is kept separate from dominant/support hand
 // selection.  UEVR's XInput bridge is the compatibility source on older
 // builds; the Operator fork can additionally supply proportional OpenXR
@@ -1073,6 +1086,43 @@ Mat3 rotation_basis(const Quat& rotation) {
         rotate(rotation, {1.0f, 0.0f, 0.0f}),
         rotate(rotation, {0.0f, 1.0f, 0.0f}),
         rotate(rotation, {0.0f, 0.0f, 1.0f})};
+}
+
+// Rotation from Blam-frame euler degrees: yaw about up (+Z), pitch about
+// left (+Y), roll about forward (+X), composed yaw*pitch*roll.
+Mat3 rotation_from_blam_euler_degrees(float pitch, float yaw, float roll) {
+    constexpr float kRadiansPerDegree = 3.14159265358979323846f / 180.0f;
+    const auto axis_quat = [](const Vec3& axis, float degrees) {
+        const auto half = degrees * kRadiansPerDegree * 0.5f;
+        const auto s = std::sin(half);
+        return Quat{axis.x * s, axis.y * s, axis.z * s, std::cos(half)};
+    };
+    return rotation_basis(normalized(
+        axis_quat({0.0f, 0.0f, 1.0f}, yaw) *
+        axis_quat({0.0f, 1.0f, 0.0f}, pitch) *
+        axis_quat({1.0f, 0.0f, 0.0f}, roll)));
+}
+
+// Minimum per-axis alignment between two bases; 1.0 means identical.
+float basis_minimum_alignment(const Mat3& a, const Mat3& b) {
+    return std::min(
+        dot(a.forward, b.forward),
+        std::min(dot(a.left, b.left), dot(a.up, b.up)));
+}
+
+// Normalized-lerp between two orthonormal bases, re-orthonormalized. Only
+// meaningful for nearby orientations (the two-hand blend keeps them within
+// a few centimetres and degrees of each other).
+Mat3 blend_basis(const Mat3& a, const Mat3& b, float weight) {
+    const auto forward = normalized(
+        a.forward + (b.forward - a.forward) * weight);
+    auto left = a.left + (b.left - a.left) * weight;
+    left = left - forward * dot(left, forward);
+    if (!finite(left) || length_squared(left) < 1.0e-6f) {
+        return weight < 0.5f ? a : b;
+    }
+    left = normalized(left);
+    return Mat3{forward, left, normalized(cross(forward, left))};
 }
 
 Mat3 rotation_between(const Vec3& source, const Vec3& destination) {
@@ -1754,16 +1804,22 @@ bool build_controller_marker(
         desired_root_position +
         transform_vector(desired_root_basis, source.local.position);
 
-    // The visible ball is ten metres along the controller aim ray, but a
-    // projectile begins at the weapon's displaced muzzle. Aim the native
-    // marker at that exact convergence point instead of keeping the muzzle
-    // ray merely parallel to the controller ray. Otherwise the two rays
-    // retain their grip-to-muzzle lateral offset and never actually meet.
-    constexpr float kReticleDistanceMeters = 10.0f;
+    // The visible ring sits reticle_distance_meters along the controller aim
+    // ray, but a projectile begins at the weapon's displaced muzzle. Aim the
+    // native marker at that exact convergence point instead of keeping the
+    // muzzle ray merely parallel to the controller ray. Otherwise the two
+    // rays retain their grip-to-muzzle lateral offset and never actually
+    // meet. Beyond the convergence point the bullet leaves the reticle line
+    // by the gun-local muzzle offset scaled with range (felt as shots
+    // landing just under the ring, rotating with controller roll), so this
+    // MUST be the same live value the reticle quad and world widget use —
+    // and a longer distance shrinks that far-field error proportionally.
+    const auto reticle_distance_meters =
+        g_reticle_distance_meters.load(std::memory_order_relaxed);
     reticle_position =
         desired_root_position +
         desired_root_basis.forward *
-            (kReticleDistanceMeters / kMetersPerBlamUnit);
+            (reticle_distance_meters / kMetersPerBlamUnit);
     const auto converged_forward =
         normalized(reticle_position - destination.position);
     const auto converged_left = normalized(
@@ -2458,21 +2514,62 @@ bool apply_split_controllers_to_first_person_palette(
             openxr_rotation_to_blam_basis(left_relative_xr);
         // The stock wrist-to-view orientation is the constant that maps
         // controller axes onto Halo's left wrist bone convention. Latch it
-        // once: re-reading it every frame leaked the running stock animation
-        // into the tracked hand as a per-frame rotation wobble.
-        if (!g_left_wrist_stock_latched.load(std::memory_order_acquire)) {
+        // once per weapon, and only after the stock pose has held still for
+        // ~a quarter second: the first frames after a weapon change are the
+        // raise/draw animation, and latching mid-swing baked that transient
+        // into the mapping, leaving the free hand rotated and offset oddly
+        // for the whole weapon. Until the latch lands, the left arm keeps
+        // its stock animation.
+        bool left_latched =
+            g_left_wrist_stock_latched.load(std::memory_order_acquire);
+        if (!left_latched) {
             const auto stock_left_wrist_basis =
                 orthonormal_basis(palette[25]);
             if (!valid_basis(stock_left_wrist_basis)) {
                 return false;
             }
-            g_left_wrist_stock_relative =
+            const auto stock_relative =
                 multiply(transpose(root_basis), stock_left_wrist_basis);
-            g_left_wrist_stock_latched.store(
-                true, std::memory_order_release);
+            if (basis_minimum_alignment(
+                    stock_relative, g_left_wrist_stock_candidate) >
+                0.9993f) {
+                ++g_left_wrist_stable_frames;
+            } else {
+                g_left_wrist_stock_candidate = stock_relative;
+                g_left_wrist_stable_frames = 0;
+            }
+            if (g_left_wrist_stable_frames >= 8) {
+                g_left_wrist_stock_relative = g_left_wrist_stock_candidate;
+                g_left_wrist_stock_latched.store(
+                    true, std::memory_order_release);
+                left_latched = true;
+            }
+            // Not settled yet: the left arm keeps its stock animation this
+            // frame and the block below stands down.
         }
-        const auto desired_left_wrist_basis = multiply(
-            multiply(root_basis, left_controller_basis),
+        if (left_latched) {
+        // Config trim in the CONTROLLER's frame so the free hand can be
+        // straightened live from the headset (the latched convention comes
+        // from the stock two-handed grip, which is not a natural free-hand
+        // orientation on every weapon).
+        auto trimmed_controller_basis = left_controller_basis;
+        {
+            const auto trim_pitch =
+                g_left_hand_trim_pitch.load(std::memory_order_relaxed);
+            const auto trim_yaw =
+                g_left_hand_trim_yaw.load(std::memory_order_relaxed);
+            const auto trim_roll =
+                g_left_hand_trim_roll.load(std::memory_order_relaxed);
+            if (trim_pitch != 0.0f || trim_yaw != 0.0f ||
+                trim_roll != 0.0f) {
+                trimmed_controller_basis = multiply(
+                    left_controller_basis,
+                    rotation_from_blam_euler_degrees(
+                        trim_pitch, trim_yaw, trim_roll));
+            }
+        }
+        auto desired_left_wrist_basis = multiply(
+            multiply(root_basis, trimmed_controller_basis),
             g_left_wrist_stock_relative);
         const auto left_grip_delta_blam =
             openxr_to_blam(left_grip_delta_xr) / kMetersPerBlamUnit;
@@ -2484,12 +2581,42 @@ bool apply_split_controllers_to_first_person_palette(
             -kGripToWristBackMeters / kMetersPerBlamUnit,
             0.0f,
             -kGripToWristDownMeters / kMetersPerBlamUnit};
-        const auto left_wrist_target =
+        auto left_wrist_target =
             palette[0].position +
             transform_vector(root_basis, left_grip_delta_blam) +
             transform_vector(
                 multiply(root_basis, left_controller_basis),
                 left_wrist_local_offset);
+
+        // Two-handed hold: ease the support hand onto the weapon's AUTHORED
+        // support pose instead of the free-tracked one. palette[25] is still
+        // the untouched stock pose here, and the stock animation keeps both
+        // hands on the gun — so transforming it by the same rigid delta the
+        // weapon branch just received lands the hand exactly where the
+        // animator put it on the forestock, and stock reload/fire animation
+        // keeps playing through it. The acquisition zone guarantees the
+        // physical hand is already within a few centimetres, so the blend
+        // only bridges a small gap.
+        const auto hold_blend =
+            g_two_hand_hold_blend.load(std::memory_order_relaxed);
+        if (hold_blend > 0.0f) {
+            const auto stock_on_weapon_position =
+                delta_position +
+                transform_vector(delta_basis, palette[25].position);
+            const auto stock_on_weapon_basis =
+                multiply(delta_basis, orthonormal_basis(palette[25]));
+            if (finite(stock_on_weapon_position) &&
+                valid_basis(stock_on_weapon_basis)) {
+                const auto weight = std::clamp(hold_blend, 0.0f, 1.0f);
+                left_wrist_target =
+                    left_wrist_target +
+                    (stock_on_weapon_position - left_wrist_target) * weight;
+                desired_left_wrist_basis = blend_basis(
+                    desired_left_wrist_basis,
+                    stock_on_weapon_basis,
+                    weight);
+            }
+        }
         if (use_arm_ik &&
             !anchor_shoulder_to_torso(
                 palette,
@@ -2525,6 +2652,7 @@ bool apply_split_controllers_to_first_person_palette(
             !left_hand_placed) {
             return false;
         }
+        }   // left_latched
     }
 
     // Finger animation is deliberately last.  Wrist placement remains a
@@ -3431,27 +3559,38 @@ void hook_first_person_weapon_build(
         constexpr std::size_t capture_count_offset = 0x24014;
         constexpr std::size_t capture_palette_offset = 0x24018;
 
-        auto* const record =
-            shared_capture +
-            static_cast<std::size_t>(capture_context[0]) *
-                capture_context_stride +
-            static_cast<std::size_t>(local_player) *
-                capture_player_stride +
-            static_cast<std::size_t>(weapon_slot) * capture_slot_stride;
-        const auto captured_tag =
-            *reinterpret_cast<const std::int32_t*>(
-                record + capture_tag_offset);
-        const auto captured_count =
-            *reinterpret_cast<const std::int32_t*>(
-                record + capture_count_offset);
-        if (captured_tag == model_tag && captured_count == final_count) {
-            auto* const captured_palette =
-                reinterpret_cast<BlamMatrix4x3*>(
-                    record + capture_palette_offset);
-            apply_controller_to_first_person_palette(
-                captured_palette,
-                captured_count,
-                tracking);
+        // Write the SAME fresh pose into BOTH interpolation banks, not just
+        // the one the builder filled this tick. Halo's renderer blends the
+        // previous bank against the current one for sub-tick smoothness of
+        // the stock animation — but for the controller-driven nodes that
+        // blend is unwanted motion smoothing: it lagged the rendered weapon
+        // up to a tick behind the hand (felt as damped, delayed aim), and
+        // during a strafe it dragged the visible gun behind the pose the
+        // projectiles actually spawned from. With both endpoints identical,
+        // the blend collapses to the fresh pose for our nodes while stock
+        // nodes keep their normal interpolation.
+        for (std::uint8_t bank = 0; bank < 2; ++bank) {
+            auto* const record =
+                shared_capture +
+                static_cast<std::size_t>(bank) * capture_context_stride +
+                static_cast<std::size_t>(local_player) *
+                    capture_player_stride +
+                static_cast<std::size_t>(weapon_slot) * capture_slot_stride;
+            const auto captured_tag =
+                *reinterpret_cast<const std::int32_t*>(
+                    record + capture_tag_offset);
+            const auto captured_count =
+                *reinterpret_cast<const std::int32_t*>(
+                    record + capture_count_offset);
+            if (captured_tag == model_tag && captured_count == final_count) {
+                auto* const captured_palette =
+                    reinterpret_cast<BlamMatrix4x3*>(
+                        record + capture_palette_offset);
+                apply_controller_to_first_person_palette(
+                    captured_palette,
+                    captured_count,
+                    tracking);
+            }
         }
     }
 
@@ -4186,6 +4325,7 @@ public:
                     L"bHiddenInGame", true);
             }
             clear_openxr_reticle_quad(true);
+            clear_navpoint_compensation();
             maintain_stock_crosshair();
             return;
         }
@@ -4197,6 +4337,7 @@ public:
         update_two_hand_hold(delta);
         update_world_reticle_transform();
         update_openxr_reticle_quad();
+        update_navpoint_compensation();
 
         if (!m_native_hook_attempted) {
             // Retry while the simulation DLL is still loading, but make a
@@ -4221,6 +4362,7 @@ public:
         refresh_replacement_reticle_state();
         maintain_weapon_attachment();
         maintain_world_reticle_widget();
+        maintain_navpoint_containers();
     }
 
     void on_device_reset() override {
@@ -4504,6 +4646,14 @@ private:
         // would swap them again.
         repaired = repair_mod_bool("VR_SwapControllerInputs", false) ||
             repaired;
+        // The dedicated OpenXR reticle quad is gated on this backend flag.
+        // The old validation launcher used to persist it; the Steam launch
+        // path has no launcher, and a UEVR config save with it false demotes
+        // the reticle to the Widget3D fallback (the path that can render
+        // black). Own it here like the other invariants. On an official
+        // backend without the extension the key is inert.
+        repaired = repair_mod_bool("UI_ExternalCompositorQuad", true) ||
+            repaired;
 
         const auto prevent_sleep_requested =
             g_prevent_controller_sleep.load(std::memory_order_acquire);
@@ -4661,6 +4811,14 @@ private:
             config.reticle_distance_meters, std::memory_order_release);
         g_reticle_extent_meters.store(
             config.reticle_extent_meters, std::memory_order_release);
+        g_hud_waypoint_fix.store(
+            config.hud_waypoint_fix, std::memory_order_release);
+        g_left_hand_trim_pitch.store(
+            config.left_hand_pitch_degrees, std::memory_order_release);
+        g_left_hand_trim_yaw.store(
+            config.left_hand_yaw_degrees, std::memory_order_release);
+        g_left_hand_trim_roll.store(
+            config.left_hand_roll_degrees, std::memory_order_release);
 
         {
             const std::scoped_lock lock{g_calibration_mutex};
@@ -5588,6 +5746,9 @@ private:
         auto* const owner = API::get()->get_local_pawn(0);
         if (owner != m_reticle_owner) {
             reset_world_reticle_cache(owner, true);
+            // The navpoints widget lives under the same HUD and dies with the
+            // pawn; drop the cache without touching the dying widget.
+            clear_navpoint_cache(false);
             m_uobject_discovery_timer = 0.0f;
             m_uobject_discovery_failures = 0;
         }
@@ -6018,12 +6179,304 @@ private:
         if (!std::isfinite(length) || length < 0.000001) {
             return std::nullopt;
         }
+
+        // Anchor the fallback ray at the grip like the compositor quad and
+        // the native muzzle convergence: offset the view origin by the
+        // composed head-to-grip vector so all three agree on the same
+        // distant point.
+        const auto grip_delta_xr = rotate(
+            composition_rotation,
+            tracking.right_grip_position - tracking.hmd_position);
+        const Vec3 grip_local_ue{
+            -grip_delta_xr.z, grip_delta_xr.x, grip_delta_xr.y};
+        constexpr double kCentimetersPerMeter = 100.0;
+        const UnrealVector origin{
+            view_location.x + (camera_forward.x * grip_local_ue.x +
+                               camera_right.x * grip_local_ue.y +
+                               camera_up.x * grip_local_ue.z) *
+                                  kCentimetersPerMeter,
+            view_location.y + (camera_forward.y * grip_local_ue.x +
+                               camera_right.y * grip_local_ue.y +
+                               camera_up.y * grip_local_ue.z) *
+                                  kCentimetersPerMeter,
+            view_location.z + (camera_forward.z * grip_local_ue.x +
+                               camera_right.z * grip_local_ue.y +
+                               camera_up.z * grip_local_ue.z) *
+                                  kCentimetersPerMeter};
         return ControllerWorldRay{
-            view_location,
+            origin,
             UnrealVector{
                 direction.x / length,
                 direction.y / length,
                 direction.z / length}};
+    }
+
+    bool set_widget_render_translation(
+        API::UObject* widget,
+        double x,
+        double y) {
+        if (widget == nullptr) {
+            return false;
+        }
+        auto* const function =
+            widget->get_class()->find_function(L"SetRenderTranslation");
+        if (function == nullptr) {
+            return false;
+        }
+        alignas(16) std::array<std::byte, 64> parameters{};
+        if (!write_function_parameter(
+                function,
+                parameters,
+                L"Translation",
+                UnrealVector2D{x, y})) {
+            return false;
+        }
+        widget->process_event(function, parameters.data());
+        return true;
+    }
+
+    void clear_navpoint_compensation() {
+        if (!m_navpoint_translation_applied) {
+            return;
+        }
+        set_widget_render_translation(m_navpoints_container, 0.0, 0.0);
+        set_widget_render_translation(m_navpoints_pin_container, 0.0, 0.0);
+        m_navpoint_translation_applied = false;
+    }
+
+    void clear_navpoint_cache(bool restore_translation) {
+        if (restore_translation) {
+            clear_navpoint_compensation();
+        }
+        m_navpoints_widget = nullptr;
+        m_navpoints_container = nullptr;
+        m_navpoints_pin_container = nullptr;
+        m_navpoint_translation_applied = false;
+    }
+
+    // Viewport width in local slate units: GetViewportSize / GetViewportScale
+    // (both static BlueprintPure on WidgetLayoutLibrary). This is the unit
+    // SetRenderTranslation consumes.
+    float read_viewport_local_width() {
+        auto& api = API::get();
+        auto* const player_controller = api->get_player_controller(0);
+        auto* const layout_class = api->find_uobject<API::UClass>(
+            L"Class /Script/UMG.WidgetLayoutLibrary");
+        if (player_controller == nullptr || layout_class == nullptr) {
+            return 0.0f;
+        }
+        auto* const layout_cdo = layout_class->get_class_default_object();
+        auto* const size_function =
+            layout_class->find_function(L"GetViewportSize");
+        auto* const scale_function =
+            layout_class->find_function(L"GetViewportScale");
+        if (layout_cdo == nullptr || size_function == nullptr ||
+            scale_function == nullptr) {
+            return 0.0f;
+        }
+
+        alignas(16) std::array<std::byte, 64> size_parameters{};
+        if (!write_function_parameter(
+                size_function,
+                size_parameters,
+                L"WorldContextObject",
+                static_cast<API::UObject*>(player_controller))) {
+            return 0.0f;
+        }
+        layout_cdo->process_event(size_function, size_parameters.data());
+        const auto size = read_function_parameter<UnrealVector2D>(
+            size_function, size_parameters, L"ReturnValue");
+
+        alignas(16) std::array<std::byte, 64> scale_parameters{};
+        if (!write_function_parameter(
+                scale_function,
+                scale_parameters,
+                L"WorldContextObject",
+                static_cast<API::UObject*>(player_controller))) {
+            return 0.0f;
+        }
+        layout_cdo->process_event(scale_function, scale_parameters.data());
+        const auto scale = read_function_parameter<float>(
+            scale_function, scale_parameters, L"ReturnValue");
+
+        if (!std::isfinite(size.x) || size.x < 64.0 ||
+            !std::isfinite(scale) || scale < 0.01f) {
+            return 0.0f;
+        }
+        return static_cast<float>(size.x) / scale;
+    }
+
+    // 4 Hz maintenance: resolve the navpoints containers and refresh the
+    // head-locked quad geometry the compensation maps through. The instance
+    // sweep below walks Halo's ~300k-entry object array, so it is gated on
+    // actual gameplay (the HUD does not exist elsewhere) and backs off
+    // exponentially after a miss — without that it re-ran every 250 ms
+    // through menus and loads, stalling the game thread into a slideshow
+    // while the compositor kept reprojecting at full rate.
+    void maintain_navpoint_containers() {
+        auto& api = API::get();
+        if (!g_hud_waypoint_fix.load(std::memory_order_acquire)) {
+            if (m_navpoints_container != nullptr) {
+                clear_navpoint_cache(true);
+            }
+            return;
+        }
+
+        m_navpoint_ui_follow_view =
+            read_mod_bool("UI_FollowView").value_or(true);
+        m_navpoint_ui_distance =
+            read_mod_float("UI_Distance").value_or(2.43f);
+        m_navpoint_ui_size = read_mod_float("UI_Size").value_or(2.0f);
+
+        if (m_navpoints_container != nullptr) {
+            return;
+        }
+        if (g_gameplay_ready_published.load(std::memory_order_acquire) != 1) {
+            m_navpoint_skip_passes = 0;
+            return;
+        }
+        if (m_navpoint_skip_passes > 0) {
+            --m_navpoint_skip_passes;
+            return;
+        }
+
+        auto* const navpoints_class = api->find_uobject<API::UClass>(
+            L"WidgetBlueprintGeneratedClass "
+            L"/Game/UI/Hud/Navpoints/WBP_Navpoints.WBP_Navpoints_C");
+        auto* const objects = API::FUObjectArray::get();
+        if (navpoints_class == nullptr || objects == nullptr) {
+            // The class itself is absent (frontend, or an unexpected build):
+            // retry rarely; this lookup is cheap but a wrong class name must
+            // not degrade into a hot loop of anything.
+            m_navpoint_skip_passes = 16;
+            return;
+        }
+
+        auto* const class_default =
+            navpoints_class->get_class_default_object();
+        API::UObject* widget = nullptr;
+        for (auto index = objects->get_object_count() - 1;
+             index >= 0;
+             --index) {
+            auto* const object = objects->get_object(index);
+            if (object == nullptr || object == class_default ||
+                !object->is_a(navpoints_class)) {
+                continue;
+            }
+            widget = object;
+            break;
+        }
+        if (widget == nullptr) {
+            // Miss: exponential backoff, 0.5 s doubling to a 4 s cap.
+            m_navpoint_discovery_failures = std::min<std::uint32_t>(
+                m_navpoint_discovery_failures + 1, 4);
+            m_navpoint_skip_passes =
+                2u << m_navpoint_discovery_failures;
+            return;
+        }
+        m_navpoint_discovery_failures = 0;
+
+        auto* const container_slot =
+            widget->get_property_data<API::UObject*>(L"NavpointsContainer");
+        auto* const pin_slot =
+            widget->get_property_data<API::UObject*>(L"PinContainer");
+        if (container_slot == nullptr || *container_slot == nullptr) {
+            m_navpoint_skip_passes = 8;   // same backoff as an instance miss
+            return;
+        }
+
+        const auto viewport_width = read_viewport_local_width();
+        if (viewport_width <= 0.0f) {
+            m_navpoint_skip_passes = 8;
+            return;
+        }
+        m_navpoint_units_per_meter =
+            viewport_width / std::max(m_navpoint_ui_size, 0.1f);
+
+        m_navpoints_widget = widget;
+        m_navpoints_container = *container_slot;
+        m_navpoints_pin_container =
+            pin_slot != nullptr ? *pin_slot : nullptr;
+        api->log_info(
+            "HaloCEMotionControls: navpoint compensation bound "
+            "(container=%p pin=%p, %.1f units/m, quad %.2fm @ %.2fm)",
+            static_cast<void*>(m_navpoints_container),
+            static_cast<void*>(m_navpoints_pin_container),
+            m_navpoint_units_per_meter,
+            m_navpoint_ui_size,
+            m_navpoint_ui_distance);
+    }
+
+    // Per tick: translate the navpoint container by the game-camera-vs-head
+    // delta projected onto UEVR's head-locked HUD quad, and counter-translate
+    // the pinned container so screen-anchored pins stay put. The game writes
+    // each marker's own RenderTransform but never these containers, so this
+    // never fights the native manager.
+    void update_navpoint_compensation() {
+        if (m_navpoints_container == nullptr) {
+            return;
+        }
+        if (!g_hud_waypoint_fix.load(std::memory_order_acquire) ||
+            !m_navpoint_ui_follow_view ||
+            m_navpoint_units_per_meter <= 0.0f) {
+            clear_navpoint_compensation();
+            return;
+        }
+
+        TrackingSnapshot tracking{};
+        {
+            const std::scoped_lock lock{g_tracking_mutex};
+            tracking = g_tracking_snapshot;
+        }
+        if (!tracking.valid) {
+            clear_navpoint_compensation();
+            return;
+        }
+
+        // UEVR renders the view as game-camera * (recenter-offset * hmd), so
+        // the game camera's forward as seen from the head-locked quad frame
+        // is the composed head rotation inverted. Deliberately independent of
+        // the aim-composition mode: the view composes this way either way.
+        const auto head = normalized(
+            tracking.stage_rotation * tracking.hmd_rotation);
+        if (!finite(head)) {
+            return;
+        }
+        const auto d = rotate(conjugate(head), Vec3{0.0f, 0.0f, -1.0f});
+        const auto forward = -d.z;
+
+        const auto limit =
+            2.0f * m_navpoint_ui_size * m_navpoint_units_per_meter;
+        float dx = 0.0f;
+        float dy = 0.0f;
+        if (forward > 0.15f) {
+            // Exact tangent mapping onto the quad plane; screen +Y is down.
+            dx = m_navpoint_ui_distance * (d.x / forward) *
+                 m_navpoint_units_per_meter;
+            dy = -m_navpoint_ui_distance * (d.y / forward) *
+                 m_navpoint_units_per_meter;
+        } else {
+            // Camera more than ~80 degrees off the quad: park the markers
+            // off-canvas instead of letting the tangent blow up.
+            dx = d.x >= 0.0f ? limit : -limit;
+        }
+        dx = std::clamp(dx, -limit, limit);
+        dy = std::clamp(dy, -limit, limit);
+
+        if (!set_widget_render_translation(
+                m_navpoints_container,
+                static_cast<double>(dx),
+                static_cast<double>(dy))) {
+            // The widget died (level transition raced the 4 Hz owner sync):
+            // drop the cache and rebind on the next maintenance pass.
+            clear_navpoint_cache(false);
+            return;
+        }
+        set_widget_render_translation(
+            m_navpoints_pin_container,
+            static_cast<double>(-dx),
+            static_cast<double>(-dy));
+        m_navpoint_translation_applied = dx != 0.0f || dy != 0.0f;
     }
 
     void update_world_reticle_transform() {
@@ -6140,8 +6593,15 @@ private:
             g_reticle_distance_meters.load(std::memory_order_relaxed);
         const auto reticle_texture_extent_meters =
             g_reticle_extent_meters.load(std::memory_order_relaxed);
+        // Anchor the ray at the GRIP, not the head. The native muzzle marker
+        // converges on (weapon root + forward * distance), and the weapon
+        // root sits at the grip's world position — anchoring the ring at the
+        // head put its ten-metre point a head-to-hand offset away from the
+        // muzzle's convergence point, so shots landed beside the ring by a
+        // per-weapon-lateral amount (some right, some left).
         const auto target =
-            tracking.hmd_position + stage_direction * reticle_distance_meters;
+            tracking.right_grip_position +
+            stage_direction * reticle_distance_meters;
         // An OpenXR quad's authored front face is +Z. Rotate that normal back
         // toward the HMD so the one-sided alpha surface is visible. The ring
         // is rotationally symmetric, so no controller roll is needed here.
@@ -6566,6 +7026,20 @@ private:
     std::uint32_t m_uobject_discovery_failures{};
     API::UObject* m_reticle_owner{};
     API::UObject* m_world_reticle_component{};
+    // HUD navpoint compensation cache. The containers belong to the HUD's
+    // WBP_Navpoints widget; the game positions individual markers via their
+    // own RenderTransforms but never touches these containers, so a container
+    // translation is an uncontested channel.
+    API::UObject* m_navpoints_widget{};
+    API::UObject* m_navpoints_container{};
+    API::UObject* m_navpoints_pin_container{};
+    bool m_navpoint_translation_applied{};
+    bool m_navpoint_ui_follow_view{true};
+    float m_navpoint_ui_distance{2.43f};
+    float m_navpoint_ui_size{2.0f};
+    float m_navpoint_units_per_meter{};
+    std::uint32_t m_navpoint_skip_passes{};
+    std::uint32_t m_navpoint_discovery_failures{};
     API::UObject* m_world_reticle_widget{};
     bool m_world_reticle_widget_rooted{};
     API::UObject* m_world_reticle_image{};

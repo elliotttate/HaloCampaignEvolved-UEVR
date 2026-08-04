@@ -76,9 +76,9 @@ int main() {
     const HandChannels physical_right{0.7f, 0.8f, 0.4f};
     auto hand = visual_hand_channels(
         physical_left, physical_right, true, false, false);
-    require(near(hand.index, 0.7f) && near(hand.grip, 0.8f) &&
-            near(hand.thumb, 0.8f),
-            "right-dominant weapon hand must use physical right exactly once");
+    require(near(hand.index, 0.7f) && near(hand.grip, 1.0f) &&
+            near(hand.thumb, 1.0f),
+            "weapon hand must stay gripped with the live trigger on top");
     hand = visual_hand_channels(
         physical_left, physical_right, false, false, false);
     require(near(hand.index, 0.1f) && near(hand.grip, 0.2f) &&
@@ -86,13 +86,13 @@ int main() {
             "right-dominant support hand must use physical left independently");
     hand = visual_hand_channels(
         physical_left, physical_right, true, true, false);
-    require(near(hand.index, 0.1f) && near(hand.grip, 0.2f),
-            "left-dominant weapon hand must use physical left exactly once");
+    require(near(hand.index, 0.6f) && near(hand.grip, 1.0f),
+            "left-dominant weapon hand must rest its index on the trigger");
     hand = visual_hand_channels(
         physical_left, physical_right, false, true, true);
-    require(near(hand.index, 0.7f) && near(hand.grip, 1.0f) &&
+    require(near(hand.index, 0.9f) && near(hand.grip, 1.0f) &&
             near(hand.thumb, 1.0f),
-            "support hold must close only the semantic support grip");
+            "support hold must close the whole support fist");
     require(physical_left_for_visual_hand(true, true) &&
             !physical_left_for_visual_hand(true, false) &&
             !physical_left_for_visual_hand(false, true) &&
